@@ -42,7 +42,7 @@ public sealed class AppConfig
 		return new AppConfig
 		{
 			ConfigVersion = 11,
-			StartWithWindows = true,
+			StartWithWindows = false,
 			QQMusicAutoStart = true,
 			QQMusicAutoPlay = true,
 			QQMusicPlaylistName = "上次播放队列",

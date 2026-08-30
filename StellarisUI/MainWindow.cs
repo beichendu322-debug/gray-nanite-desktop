@@ -80,6 +80,10 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private bool _weatherRefreshInProgress;
 
+	private bool _folderCountRefreshInProgress;
+
+	private int _folderCountTick;
+
 	private Process? _codexProcess;
 
 	private CancellationTokenSource? _codexCancellation;
@@ -134,6 +138,11 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private static readonly string[] MusicModeLabels = { "顺序播放", "单曲循环", "列表循环", "随机播放" };
 
+	private static readonly HashSet<string> ExecutableExtensions = new(StringComparer.OrdinalIgnoreCase)
+	{
+		".appref-ms", ".bat", ".cmd", ".com", ".cpl", ".exe", ".hta", ".js", ".jse", ".lnk", ".msi", ".msp", ".ps1", ".reg", ".scr", ".url", ".vbs", ".wsf", ".wsh"
+	};
+
 	private NotifyIcon? _trayIcon;
 
 	private nint _foregroundHook;
@@ -143,10 +152,6 @@ public partial class MainWindow : Window, IComponentConnector
 	private const int HotkeyId = 18960;
 
 	private const int WmHotkey = 786;
-
-	private const int WmMouseActivate = 33;
-
-	private const int MaNoActivate = 3;
 
 	private const uint ModNoRepeat = 16384u;
 
@@ -218,9 +223,13 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			Interval = TimeSpan.FromSeconds(1L)
 		};
-		_clockTimer.Tick += delegate
+		_clockTimer.Tick += async delegate
 		{
 			UpdateSystemStatus();
+			if (++_folderCountTick % 15 == 0)
+			{
+				await RefreshFolderCountAsync();
+			}
 			AnchorDesktopLayer();
 		};
 		_clockTimer.Start();
@@ -265,6 +274,7 @@ public partial class MainWindow : Window, IComponentConnector
 		base.Loaded += async delegate
 		{
 			StartCharacterAnimation();
+			await RefreshFolderCountAsync();
 			await RefreshWeatherAsync();
 			_weatherTimer?.Start();
 			await InitializeMusicAsync();
@@ -277,7 +287,7 @@ public partial class MainWindow : Window, IComponentConnector
 		base.PreviewKeyDown += Window_PreviewKeyDown;
 		base.Activated += delegate
 		{
-			ScheduleDesktopLayerSync();
+			AnchorDesktopLayer();
 		};
 		base.Deactivated += delegate
 		{
@@ -315,7 +325,7 @@ public partial class MainWindow : Window, IComponentConnector
 				throw new InvalidOperationException("QQ Music bridge is missing or incomplete");
 			}
 			AppConfig config = AppConfig.CreateDefault(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
-			if (config.ConfigVersion != 11 || !config.StartWithWindows || !config.QQMusicAutoStart || !config.QQMusicAutoPlay || config.QQMusicVolume <= 0.0 || config.Folders.Count != 8 || config.Folders.Any((FolderBinding f) => string.IsNullOrWhiteSpace(f.TerminalName)) || config.Folders.All((FolderBinding f) => f.Id != "inbox"))
+			if (config.ConfigVersion != 11 || config.StartWithWindows || !config.QQMusicAutoStart || !config.QQMusicAutoPlay || config.QQMusicVolume <= 0.0 || config.Folders.Count != 8 || config.Folders.Any((FolderBinding f) => string.IsNullOrWhiteSpace(f.TerminalName)) || config.Folders.All((FolderBinding f) => f.Id != "inbox"))
 			{
 				throw new InvalidOperationException("default folder bindings are incomplete");
 			}
@@ -327,7 +337,7 @@ public partial class MainWindow : Window, IComponentConnector
 			legacy.ConfigVersion = 9;
 			legacy.StartWithWindows = false;
 			legacy.Folders.RemoveAll((FolderBinding folder) => folder.Id == "inbox");
-			if (!UpgradeConfig(legacy, "D:\\Desktop") || legacy.ConfigVersion != 11 || !legacy.StartWithWindows || !legacy.QQMusicAutoStart || !legacy.QQMusicAutoPlay || legacy.Folders.Count != 8)
+			if (!UpgradeConfig(legacy, "D:\\Desktop") || legacy.ConfigVersion != 11 || legacy.StartWithWindows || !legacy.QQMusicAutoStart || !legacy.QQMusicAutoPlay || legacy.Folders.Count != 8)
 			{
 				throw new InvalidOperationException("legacy startup migration failed");
 			}
@@ -343,6 +353,36 @@ public partial class MainWindow : Window, IComponentConnector
 			if (IsAllowedPath("C:\\other", new[] { "D:\\project" }))
 			{
 				throw new InvalidOperationException("allowed path check is too broad");
+			}
+			string authorizationRoot = Path.Combine(Path.GetTempPath(), $"gray-root-{Guid.NewGuid():N}");
+			string authorizationOutside = Path.Combine(Path.GetTempPath(), $"gray-outside-{Guid.NewGuid():N}");
+			string authorizationLink = Path.Combine(authorizationRoot, "link");
+			try
+			{
+				Directory.CreateDirectory(authorizationRoot);
+				Directory.CreateDirectory(authorizationOutside);
+				try
+				{
+					Directory.CreateSymbolicLink(authorizationLink, authorizationOutside);
+					if (IsAllowedPath(Path.Combine(authorizationLink, "escape.txt"), new[] { authorizationRoot }))
+					{
+						throw new InvalidOperationException("reparse-point path escaped the allowed root");
+					}
+				}
+				catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+				{
+					// Windows without Developer Mode may not permit this optional regression check.
+				}
+			}
+			finally
+			{
+				if (Directory.Exists(authorizationLink)) Directory.Delete(authorizationLink);
+				if (Directory.Exists(authorizationRoot)) Directory.Delete(authorizationRoot, recursive: true);
+				if (Directory.Exists(authorizationOutside)) Directory.Delete(authorizationOutside, recursive: true);
+			}
+			if (!RequiresLaunchConfirmation("D:\\project\\tool.exe") || RequiresLaunchConfirmation("D:\\project\\manual.pdf"))
+			{
+				throw new InvalidOperationException("executable launch confirmation check failed");
 			}
 			List<FileItem> source = new List<FileItem>
 			{
@@ -399,15 +439,15 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			if (File.Exists(path))
 			{
-				AppConfig existing = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(path), JsonOptions);
-				List<FolderBinding> list = existing?.Folders;
+				AppConfig? existing = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(path), JsonOptions);
+				List<FolderBinding>? list = existing?.Folders;
 				if (list != null && list.Count > 0)
 				{
 					if (UpgradeConfig(existing!, Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)))
 					{
 						File.WriteAllText(path, JsonSerializer.Serialize(existing, JsonOptions), Encoding.UTF8);
 					}
-					return existing;
+					return existing!;
 				}
 			}
 		}
@@ -425,7 +465,6 @@ public partial class MainWindow : Window, IComponentConnector
 		if (config.ConfigVersion < 10)
 		{
 			config.ConfigVersion = 10;
-			config.StartWithWindows = true;
 			upgraded = true;
 		}
 		if (config.ConfigVersion < 11)
@@ -622,6 +661,7 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		ApplyFileFilter();
 		UpdateSystemStatus();
+		_ = RefreshFolderCountAsync();
 	}
 
 	private void ApplyFileFilter()
@@ -684,15 +724,35 @@ public partial class MainWindow : Window, IComponentConnector
 		DateTime now = DateTime.Now;
 		ClockText.Text = now.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
 		DateText.Text = now.ToString("yyyy.MM.dd ddd", CultureInfo.InvariantCulture).ToUpperInvariant();
-		int count = _config.Folders.Sum((FolderBinding f) => SafeCount(f.Path));
-		TotalCountText.Text = Math.Min(count, 999).ToString("000", CultureInfo.InvariantCulture);
-		DriveInfo drive = ResolveStorageDrive();
+		DriveInfo? drive = ResolveStorageDrive();
 		StorageText.Text = ((drive == null) ? "--" : $"{drive.RootDirectory.FullName.TrimEnd('\\')} {(double)drive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0:0.0}G");
 		PowerStatus power = SystemInformation.PowerStatus;
 		int pct = Math.Clamp((int)Math.Round(power.BatteryLifePercent * 100f), 0, 100);
 		BatteryText.Text = ((power.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online) ? $"POWER // AC {pct}%" : $"POWER // {pct}%");
 		NetworkText.Text = "NETWORK // LOCAL";
 		RecycleText.Text = GetRecycleText();
+	}
+
+	private async Task RefreshFolderCountAsync()
+	{
+		if (_closing || _folderCountRefreshInProgress)
+		{
+			return;
+		}
+		_folderCountRefreshInProgress = true;
+		string[] paths = _config.Folders.Select((FolderBinding folder) => folder.Path).ToArray();
+		try
+		{
+			int count = await Task.Run(() => paths.Sum(SafeCount));
+			if (!_closing)
+			{
+				TotalCountText.Text = Math.Min(count, 999).ToString("000", CultureInfo.InvariantCulture);
+			}
+		}
+		finally
+		{
+			_folderCountRefreshInProgress = false;
+		}
 	}
 
 	private static HttpClient CreateWeatherClient()
@@ -874,7 +934,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void InitializeDriveSelection()
 	{
-		Border storageBorder = FindVisualAncestor<Border>(StorageText);
+		Border? storageBorder = FindVisualAncestor<Border>(StorageText);
 		if (storageBorder == null)
 		{
 			return;
@@ -1601,7 +1661,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void AddMoveSelectionButton()
 	{
-		Grid toolbar = FindVisualAncestor(SearchBox, (Grid grid) => grid.ColumnDefinitions.Count == 2 && FindVisualDescendants(grid).OfType<System.Windows.Controls.Button>().Any((System.Windows.Controls.Button button) => string.Equals(button.Content?.ToString(), "↻ SCAN", StringComparison.Ordinal)));
+		Grid? toolbar = FindVisualAncestor(SearchBox, (Grid grid) => grid.ColumnDefinitions.Count == 2 && FindVisualDescendants(grid).OfType<System.Windows.Controls.Button>().Any((System.Windows.Controls.Button button) => string.Equals(button.Content?.ToString(), "↻ SCAN", StringComparison.Ordinal)));
 		if (toolbar == null)
 		{
 			return;
@@ -1702,11 +1762,11 @@ public partial class MainWindow : Window, IComponentConnector
 					}
 					if (item.IsDirectory)
 					{
-						Directory.Move(item.FullPath, targetPath);
+						Microsoft.VisualBasic.FileIO.FileSystem.MoveDirectory(item.FullPath, targetPath, overwrite: false);
 					}
 					else
 					{
-						File.Move(item.FullPath, targetPath);
+						Microsoft.VisualBasic.FileIO.FileSystem.MoveFile(item.FullPath, targetPath, overwrite: false);
 					}
 					moved++;
 				}
@@ -1753,7 +1813,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async void SubmitChat()
 	{
-		Process codexProcess = _codexProcess;
+		Process? codexProcess = _codexProcess;
 		if (codexProcess != null && !codexProcess.HasExited)
 		{
 			CancelCodex();
@@ -1818,17 +1878,7 @@ public partial class MainWindow : Window, IComponentConnector
 			StandardErrorEncoding = Encoding.UTF8
 		};
 		psi.ArgumentList.Add("exec");
-		// Keep Codex constrained to the terminal workspace, but grant write access to
-		// every folder the commander explicitly bound in the UI. These options must
-		// be placed before the `resume` subcommand; otherwise resumed sessions lose
-		// the additional writable roots and ordinary file operations are denied.
-		psi.ArgumentList.Add("--sandbox");
-		psi.ArgumentList.Add("workspace-write");
-		foreach (string path in GetBoundDirectories())
-		{
-			psi.ArgumentList.Add("--add-dir");
-			psi.ArgumentList.Add(path);
-		}
+		// No sandbox or approval flags: Codex inherits the user's own configuration.
 		if (_codexSessionId != null)
 		{
 			psi.ArgumentList.Add("resume");
@@ -1865,7 +1915,7 @@ public partial class MainWindow : Window, IComponentConnector
 		using StreamReader reader = process.StandardOutput;
 		while (true)
 		{
-			string line = await reader.ReadLineAsync(cancellationToken);
+			string? line = await reader.ReadLineAsync(cancellationToken);
 			if (line == null)
 			{
 				break;
@@ -1905,7 +1955,7 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			using JsonDocument doc = JsonDocument.Parse(line);
 			JsonElement root = doc.RootElement;
-			string type = (root.TryGetProperty("type", out var t) ? t.GetString() : null);
+			string? type = (root.TryGetProperty("type", out var t) ? t.GetString() : null);
 			JsonElement item;
 			if (type == "thread.started" && root.TryGetProperty("thread_id", out var id))
 			{
@@ -1915,7 +1965,7 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 			else if (type == "item.completed" && root.TryGetProperty("item", out item))
 			{
-				string itemType = (item.TryGetProperty("type", out var it) ? it.GetString() : null);
+				string? itemType = (item.TryGetProperty("type", out var it) ? it.GetString() : null);
 				JsonElement text;
 				if (itemType == "command_execution")
 				{
@@ -1928,7 +1978,7 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 			else if ((type == "turn.failed" || type == "error") ? true : false)
 			{
-				string message = (root.TryGetProperty("message", out var m) ? m.GetString() : "Codex 执行失败");
+				string message = (root.TryGetProperty("message", out var m) ? m.GetString() : null) ?? "Codex 执行失败";
 				CodexStatusText.Text = "CODEX RETRYING";
 				FooterStatusText.Text = "LOG // " + message;
 			}
@@ -1940,7 +1990,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void HandleAgentMessage(string text)
 	{
-		AssistantEnvelope envelope = null;
+		AssistantEnvelope? envelope = null;
 		try
 		{
 			envelope = JsonSerializer.Deserialize<AssistantEnvelope>(text, JsonOptions);
@@ -1948,7 +1998,7 @@ public partial class MainWindow : Window, IComponentConnector
 		catch
 		{
 		}
-		if ((object)envelope == null || string.IsNullOrWhiteSpace(envelope.Reply))
+		if (envelope == null || string.IsNullOrWhiteSpace(envelope.Reply))
 		{
 			envelope = new AssistantEnvelope(text, "idle", "READY");
 		}
@@ -2045,6 +2095,10 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			displayName = target;
 		}
+		if (RequiresLaunchConfirmation(target) && System.Windows.MessageBox.Show($"灰风请求启动可能执行代码的条目：\n\n{target}\n\n是否继续？", "确认启动", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+		{
+			return $"系统已取消启动：{displayName}";
+		}
 		string? workingDirectory = Directory.Exists(target) ? target : Path.GetDirectoryName(target);
 		long shellResult = ShellExecute(_windowHandle, "open", target, null, workingDirectory, 1).ToInt64();
 		if (shellResult <= 32)
@@ -2053,6 +2107,11 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		FooterStatusText.Text = $"LOG // OPEN REQUEST SENT · {displayName}";
 		return $"系统已实际调用 Windows 打开入口：{displayName}";
+	}
+
+	private static bool RequiresLaunchConfirmation(string target)
+	{
+		return !Directory.Exists(target) && ExecutableExtensions.Contains(Path.GetExtension(target));
 	}
 
 	private static void PrepareNewFileTarget(string target, IEnumerable<string> roots)
@@ -2205,7 +2264,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void RemoveUnneededHud()
 	{
-		Grid activeGrid = FindVisualAncestor(ActiveFolderText, (Grid g) => g.RowDefinitions.Count == 4);
+		Grid? activeGrid = FindVisualAncestor(ActiveFolderText, (Grid g) => g.RowDefinitions.Count == 4);
 		if (activeGrid != null)
 		{
 			activeGrid.RowDefinitions[0].Height = new GridLength(0.0);
@@ -2253,72 +2312,6 @@ public partial class MainWindow : Window, IComponentConnector
 		PersistChatHistory();
 	}
 
-	private void ArrangeCommandInput()
-	{
-		Grid stage = FindVisualAncestor(ChatInput, (Grid grid) => grid.RowDefinitions.Count == 2 && grid.ColumnDefinitions.Count == 0);
-		Border explanation = FindVisualAncestor<Border>(AssistantMessage);
-		Border inputBorder = FindVisualAncestor<Border>(ChatInput);
-		if (stage == null || explanation == null || inputBorder == null)
-		{
-			return;
-		}
-		stage.RowDefinitions.Add(new RowDefinition
-		{
-			Height = GridLength.Auto
-		});
-		Grid.SetRow(explanation, 1);
-		Grid.SetRow(inputBorder, 2);
-		inputBorder.Margin = new Thickness(6.0, 8.0, 6.0, 0.0);
-		inputBorder.VerticalAlignment = VerticalAlignment.Top;
-		if (VisualTreeHelper.GetParent(ChatInput) is Grid inputGrid)
-		{
-			System.Windows.Controls.Button send = FindVisualDescendants(inputBorder).OfType<System.Windows.Controls.Button>().FirstOrDefault((System.Windows.Controls.Button button) => string.Equals(button.Content?.ToString(), "SEND  ↵", StringComparison.Ordinal));
-			if (send != null)
-			{
-				inputGrid.Children.Remove(send);
-			}
-			inputGrid.ColumnDefinitions.Clear();
-			inputGrid.ColumnDefinitions.Add(new ColumnDefinition
-			{
-				Width = GridLength.Auto
-			});
-			inputGrid.ColumnDefinitions.Add(new ColumnDefinition
-			{
-				Width = new GridLength(1.0, GridUnitType.Star)
-			});
-			inputGrid.ColumnDefinitions.Add(new ColumnDefinition
-			{
-				Width = GridLength.Auto
-			});
-			TextBlock prompt = new TextBlock
-			{
-				Text = ">_",
-				FontFamily = new System.Windows.Media.FontFamily("Consolas"),
-				FontSize = 12.0,
-				Foreground = (FindResource("Cyan") as System.Windows.Media.Brush),
-				VerticalAlignment = VerticalAlignment.Center,
-				Margin = new Thickness(4.0, 0.0, 8.0, 0.0)
-			};
-			Grid.SetColumn(prompt, 0);
-			Grid.SetColumn(ChatInput, 1);
-			ChatInput.ToolTip = "输入指令，按 Enter 发送";
-			inputGrid.Children.Insert(0, prompt);
-			System.Windows.Controls.Button imeInput = new System.Windows.Controls.Button
-			{
-				Style = (FindResource("TerminalButton") as Style),
-				Content = "中 INPUT",
-				Margin = new Thickness(8.0, 0.0, 0.0, 0.0),
-				Padding = new Thickness(10.0, 6.0, 10.0, 6.0)
-			};
-			Grid.SetColumn(imeInput, 2);
-			imeInput.Click += delegate
-			{
-				ShowTextEntryDialog(ChatInput, "灰风指令输入");
-			};
-			inputGrid.Children.Add(imeInput);
-		}
-	}
-
 	private void LoadChatHistory()
 	{
 		try
@@ -2355,10 +2348,10 @@ public partial class MainWindow : Window, IComponentConnector
 		_codexCancellation?.Cancel();
 		try
 		{
-			Process codexProcess = _codexProcess;
+			Process? codexProcess = _codexProcess;
 			if (codexProcess != null && !codexProcess.HasExited)
 			{
-				_codexProcess.Kill(entireProcessTree: true);
+				codexProcess.Kill(entireProcessTree: true);
 			}
 		}
 		catch
@@ -2371,7 +2364,7 @@ public partial class MainWindow : Window, IComponentConnector
 		string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OpenAI", "Codex", "bin");
 		try
 		{
-			string found = (Directory.Exists(root) ? Directory.EnumerateFiles(root, "codex.exe", SearchOption.AllDirectories).OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault() : null);
+			string? found = (Directory.Exists(root) ? Directory.EnumerateFiles(root, "codex.exe", SearchOption.AllDirectories).OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault() : null);
 			if (found != null)
 			{
 				return found;
@@ -2385,7 +2378,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private static string FindProjectDirectory(string runtimeDirectory)
 	{
-		DirectoryInfo directory = new DirectoryInfo(runtimeDirectory);
+		DirectoryInfo? directory = new DirectoryInfo(runtimeDirectory);
 		int i = 0;
 		while (i < 6 && directory != null)
 		{
@@ -2629,11 +2622,7 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 			}
 		}
-		Activate();
-		if (_windowHandle != IntPtr.Zero)
-		{
-			SetWindowPos(_windowHandle, IntPtr.Zero, 0, 0, 0, 0, 67u);
-		}
+		AnchorDesktopLayer();
 	}
 
 	private void TextInput_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
@@ -2750,18 +2739,13 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		else if (e.Key == Key.Escape)
 		{
-			Process codexProcess = _codexProcess;
+			Process? codexProcess = _codexProcess;
 			if (codexProcess != null && !codexProcess.HasExited)
 			{
 				e.Handled = true;
 				CancelCodex();
 			}
 		}
-	}
-
-	private void SendButton_Click(object sender, RoutedEventArgs e)
-	{
-		SubmitChat();
 	}
 
 	private void ChatImeButton_Click(object sender, RoutedEventArgs e)
@@ -2799,15 +2783,15 @@ public partial class MainWindow : Window, IComponentConnector
 			Hide();
 			return;
 		}
-		Show();
 		base.WindowState = WindowState.Maximized;
+		Show();
 		AnchorDesktopLayer();
 	}
 
 	private void ShowFromTray()
 	{
-		Show();
 		base.WindowState = WindowState.Maximized;
+		Show();
 		AnchorDesktopLayer();
 	}
 
@@ -2868,8 +2852,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void AnchorDesktopLayer()
 	{
-		bool textInputActive = _textEntryDialogOpen || ChatInput?.IsKeyboardFocusWithin == true || SearchBox?.IsKeyboardFocusWithin == true;
-		if (_windowHandle != IntPtr.Zero && base.IsVisible && !textInputActive)
+		if (_windowHandle != IntPtr.Zero && base.IsVisible)
 		{
 			nint desktopAnchor = FindWindow("Progman", "Program Manager");
 			if (desktopAnchor == IntPtr.Zero)
@@ -2938,7 +2921,40 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private static bool IsAllowedPath(string candidate, IEnumerable<string> roots)
 	{
-		return roots.Any((string root) => string.Equals(Path.GetFullPath(candidate).TrimEnd(Path.DirectorySeparatorChar), Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase) || Path.GetFullPath(candidate).StartsWith(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+		try
+		{
+			string candidatePath = Path.GetFullPath(candidate).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+			foreach (string root in roots)
+			{
+				string rootPath = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+				if (!string.Equals(candidatePath, rootPath, StringComparison.OrdinalIgnoreCase) && !candidatePath.StartsWith(rootPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+				{
+					continue;
+				}
+				string current = rootPath;
+				foreach (string part in Path.GetRelativePath(rootPath, candidatePath).Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries))
+				{
+					if (part == ".")
+					{
+						continue;
+					}
+					current = Path.Combine(current, part);
+					if (!File.Exists(current) && !Directory.Exists(current))
+					{
+						break;
+					}
+					if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+					{
+						return false;
+					}
+				}
+				return true;
+			}
+		}
+		catch
+		{
+		}
+		return false;
 	}
 
 	[DllImport("user32.dll", SetLastError = true)]

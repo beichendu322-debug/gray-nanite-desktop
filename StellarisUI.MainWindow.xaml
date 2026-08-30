@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<Window x:Class="StellarisUI.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:d="http://schemas.microsoft.com/expression/blend/2008" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" Title="灰风 · 纳米指挥终端" WindowStyle="None" ResizeMode="NoResize" WindowState="Maximized" Topmost="False" ShowActivated="True" ShowInTaskbar="True" Background="#070A0F" UseLayoutRounding="True" SnapsToDevicePixels="True" xmlns:stellarisui="clr-namespace:StellarisUI;assembly=StellarisUI">
+<Window x:Class="StellarisUI.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:d="http://schemas.microsoft.com/expression/blend/2008" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" Title="灰风 · 纳米指挥终端" WindowStyle="None" ResizeMode="NoResize" WindowState="Maximized" Topmost="False" ShowActivated="False" ShowInTaskbar="False" Background="#070A0F" UseLayoutRounding="True" SnapsToDevicePixels="True" xmlns:stellarisui="clr-namespace:StellarisUI;assembly=StellarisUI">
   <FrameworkElement.Resources>
     <ResourceDictionary>
       <SolidColorBrush x:Key="LineSoft" Color="#26364049" />
@@ -239,12 +239,10 @@
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
                   </Grid.ColumnDefinitions>
                   <TextBlock Text=">_" FontFamily="Consolas" FontSize="20" Foreground="{StaticResource Cyan}" VerticalAlignment="Center" Margin="3,0,10,0" />
                   <TextBox Name="ChatInput" Grid.Column="1" Background="#00FFFFFF" BorderThickness="0" Foreground="#FFFFFFFF" CaretBrush="{StaticResource Cyan}" FontSize="18" FontWeight="SemiBold" VerticalContentAlignment="Center" Padding="4" ToolTip="向灰风下达指令" Language="zh-CN" InputMethod.IsInputMethodEnabled="True" InputMethod.PreferredImeState="On" GotKeyboardFocus="TextInput_GotKeyboardFocus" LostKeyboardFocus="TextInput_LostKeyboardFocus" KeyDown="ChatInput_KeyDown" />
                   <Button Grid.Column="2" Style="{StaticResource TerminalButton}" Content="中" Margin="8,0,0,0" Padding="9,6" Click="ChatImeButton_Click" ToolTip="中文输入窗口" />
-                  <Button Name="SendButton" Grid.Column="3" Style="{StaticResource TerminalButton}" Content="SEND  ↵" Margin="8,0,0,0" Padding="11,6" Click="SendButton_Click" />
                 </Grid>
               </Border>
             </Grid>
