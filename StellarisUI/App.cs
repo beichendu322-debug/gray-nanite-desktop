@@ -29,9 +29,9 @@ public class App : Application
 		}
 		nint previousForeground = GetForegroundWindow();
 		MainWindow window = (MainWindow)(base.MainWindow = new MainWindow());
+		window.FitDesktopBounds();
 		window.Show();
 		window.Visibility = Visibility.Visible;
-		window.WindowState = WindowState.Maximized;
 		window.RestorePreviousForeground(previousForeground);
 	}
 

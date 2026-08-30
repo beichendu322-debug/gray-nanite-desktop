@@ -8,6 +8,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
+using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -76,6 +77,10 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private DispatcherTimer? _musicVolumeTimer;
 
+	private DispatcherTimer? _audioVisualizerTimer;
+
+	private DispatcherTimer? _telemetryTimer;
+
 	private readonly HttpClient _weatherClient = CreateWeatherClient();
 
 	private bool _weatherRefreshInProgress;
@@ -128,11 +133,43 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private bool _musicUiReady;
 
+	private bool _musicSeekable;
+
+	private double? _pendingSeekSeconds;
+
+	private DateTime _pendingSeekUntil;
+
 	private double _musicPositionSeconds;
 
 	private double _musicDurationSeconds;
 
 	private int _musicModeIndex;
+
+	private readonly List<Border> _audioBars = new();
+
+	private bool _audioSampleInProgress;
+
+	private double _visualizerPhase;
+
+	private bool _telemetryRefreshInProgress;
+
+	private bool _cpuSampleReady;
+
+	private ulong _previousCpuIdle;
+
+	private ulong _previousCpuKernel;
+
+	private ulong _previousCpuUser;
+
+	private long _previousNetworkReceived;
+
+	private long _previousNetworkSent;
+
+	private DateTime _previousNetworkSample = DateTime.UtcNow;
+
+	private double _networkDownRate;
+
+	private double _networkUpRate;
 
 	private static readonly string[] MusicModeKeys = { "sequence", "repeat-one", "repeat-all", "shuffle" };
 
@@ -200,6 +237,7 @@ public partial class MainWindow : Window, IComponentConnector
 	public MainWindow()
 	{
 		InitializeComponent();
+		InitializeAudioVisualizer();
 		RemoveUnneededHud();
 		FileList.SelectionMode = System.Windows.Controls.SelectionMode.Extended;
 		_projectDirectory = FindProjectDirectory(_baseDirectory);
@@ -271,9 +309,16 @@ public partial class MainWindow : Window, IComponentConnector
 			SaveConfig();
 			await Task.Run(() => QQMusicAudio.SetVolume(volume));
 		};
+		_audioVisualizerTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(90.0) };
+		_audioVisualizerTimer.Tick += async delegate { await RefreshAudioVisualizerAsync(); };
+		_telemetryTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.0) };
+		_telemetryTimer.Tick += async delegate { await RefreshTelemetryAsync(); };
 		base.Loaded += async delegate
 		{
 			StartCharacterAnimation();
+			await RefreshTelemetryAsync();
+			_telemetryTimer?.Start();
+			_audioVisualizerTimer?.Start();
 			await RefreshFolderCountAsync();
 			await RefreshWeatherAsync();
 			_weatherTimer?.Start();
@@ -320,9 +365,18 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 			embeddedResources.ReleaseAllResources();
 			string musicBridge = Path.Combine(AppContext.BaseDirectory, "Tools", "QQMusicBridge.ps1");
-			if (!File.Exists(musicBridge) || !File.ReadAllText(musicBridge, Encoding.UTF8).Contains("TryChangePlaybackPositionAsync", StringComparison.Ordinal))
+			if (!File.Exists(musicBridge) || !File.ReadAllText(musicBridge, Encoding.UTF8).Contains("IsPlaybackPositionEnabled", StringComparison.Ordinal))
 			{
 				throw new InvalidOperationException("QQ Music bridge is missing or incomplete");
+			}
+			if (ComputeVisualizerBarHeight(0.8, 12, 56, 1.0) <= ComputeVisualizerBarHeight(0.0, 12, 56, 1.0) || FormatDataRate(2 * 1024 * 1024) != "2.0M/s")
+			{
+				throw new InvalidOperationException("telemetry visualizer helpers failed");
+			}
+			double audioPeak = QQMusicAudio.GetPeak();
+			if (audioPeak < -1.0 || audioPeak > 1.0)
+			{
+				throw new InvalidOperationException("Windows audio peak meter returned an invalid value");
 			}
 			AppConfig config = AppConfig.CreateDefault(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
 			if (config.ConfigVersion != 11 || config.StartWithWindows || !config.QQMusicAutoStart || !config.QQMusicAutoPlay || config.QQMusicVolume <= 0.0 || config.Folders.Count != 8 || config.Folders.Any((FolderBinding f) => string.IsNullOrWhiteSpace(f.TerminalName)) || config.Folders.All((FolderBinding f) => f.Id != "inbox"))
@@ -729,8 +783,195 @@ public partial class MainWindow : Window, IComponentConnector
 		PowerStatus power = SystemInformation.PowerStatus;
 		int pct = Math.Clamp((int)Math.Round(power.BatteryLifePercent * 100f), 0, 100);
 		BatteryText.Text = ((power.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online) ? $"POWER // AC {pct}%" : $"POWER // {pct}%");
-		NetworkText.Text = "NETWORK // LOCAL";
+		TelemetryTimeText.Text = now.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+		TelemetryDateText.Text = now.ToString("yyyy.MM.dd", CultureInfo.InvariantCulture);
+		NetworkText.Text = $"NETWORK // ↓ {FormatDataRate(_networkDownRate)}  ↑ {FormatDataRate(_networkUpRate)}";
 		RecycleText.Text = GetRecycleText();
+	}
+
+	private async Task RefreshTelemetryAsync()
+	{
+		if (_closing || _telemetryRefreshInProgress)
+		{
+			return;
+		}
+		_telemetryRefreshInProgress = true;
+		try
+		{
+			double cpu = ReadCpuUsage();
+			ReadNetworkRates();
+			(double gpu, string gpuDetail) = await ReadGpuUsageAsync();
+			if (_closing)
+			{
+				return;
+			}
+			CpuValueText.Text = cpu < 0 ? "CPU  --%" : $"CPU  {cpu:0}%";
+			CpuUsageBar.Value = Math.Max(0.0, cpu);
+			GpuValueText.Text = gpu < 0 ? "GPU  --%" : $"GPU  {gpu:0}%";
+			GpuUsageBar.Value = Math.Max(0.0, gpu);
+			GpuDetailText.Text = gpuDetail;
+			NetworkRateText.Text = $"NET  {FormatDataRate(_networkDownRate + _networkUpRate)}";
+			NetworkDetailText.Text = $"DOWN {FormatDataRate(_networkDownRate)}  /  UP {FormatDataRate(_networkUpRate)}";
+			TelemetryStatusText.Text = gpu < 0 ? "  //  GPU UTILIZATION UNAVAILABLE" : "  //  ALL LINKS NOMINAL";
+		}
+		finally
+		{
+			_telemetryRefreshInProgress = false;
+		}
+	}
+
+	private double ReadCpuUsage()
+	{
+		if (!GetSystemTimes(out var idleTime, out var kernelTime, out var userTime))
+		{
+			return -1.0;
+		}
+		ulong idle = FileTimeToUInt64(idleTime);
+		ulong kernel = FileTimeToUInt64(kernelTime);
+		ulong user = FileTimeToUInt64(userTime);
+		if (!_cpuSampleReady)
+		{
+			_cpuSampleReady = true;
+			_previousCpuIdle = idle;
+			_previousCpuKernel = kernel;
+			_previousCpuUser = user;
+			return 0.0;
+		}
+		ulong idleDelta = idle - _previousCpuIdle;
+		ulong totalDelta = kernel - _previousCpuKernel + user - _previousCpuUser;
+		_previousCpuIdle = idle;
+		_previousCpuKernel = kernel;
+		_previousCpuUser = user;
+		return totalDelta == 0 ? 0.0 : Math.Clamp((totalDelta - Math.Min(idleDelta, totalDelta)) * 100.0 / totalDelta, 0.0, 100.0);
+	}
+
+	private void ReadNetworkRates()
+	{
+		long received = 0;
+		long sent = 0;
+		foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces().Where(adapter => adapter.OperationalStatus == OperationalStatus.Up && adapter.NetworkInterfaceType != NetworkInterfaceType.Loopback))
+		{
+			try
+			{
+				IPv4InterfaceStatistics statistics = adapter.GetIPv4Statistics();
+				received += statistics.BytesReceived;
+				sent += statistics.BytesSent;
+			}
+			catch
+			{
+			}
+		}
+		DateTime now = DateTime.UtcNow;
+		double elapsed = Math.Max(0.1, (now - _previousNetworkSample).TotalSeconds);
+		if (_previousNetworkReceived > 0 || _previousNetworkSent > 0)
+		{
+			_networkDownRate = Math.Max(0.0, received - _previousNetworkReceived) / elapsed;
+			_networkUpRate = Math.Max(0.0, sent - _previousNetworkSent) / elapsed;
+		}
+		_previousNetworkReceived = received;
+		_previousNetworkSent = sent;
+		_previousNetworkSample = now;
+	}
+
+	private static async Task<(double Usage, string Detail)> ReadGpuUsageAsync()
+	{
+		string systemTool = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "nvidia-smi.exe");
+		string programTool = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe");
+		string executable = File.Exists(systemTool) ? systemTool : File.Exists(programTool) ? programTool : "nvidia-smi";
+		try
+		{
+			ProcessStartInfo startInfo = new ProcessStartInfo
+			{
+				FileName = executable,
+				UseShellExecute = false,
+				CreateNoWindow = true,
+				RedirectStandardOutput = true,
+				RedirectStandardError = true
+			};
+			startInfo.ArgumentList.Add("--query-gpu=utilization.gpu,memory.used,memory.total");
+			startInfo.ArgumentList.Add("--format=csv,noheader,nounits");
+			using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException();
+			using CancellationTokenSource timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2.0));
+			string output = await process.StandardOutput.ReadToEndAsync(timeout.Token);
+			await process.WaitForExitAsync(timeout.Token);
+			string[] values = output.Split(new[] { ',', '\r', '\n' }, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+			if (process.ExitCode == 0 && values.Length >= 3 && double.TryParse(values[0], NumberStyles.Float, CultureInfo.InvariantCulture, out double usage) && double.TryParse(values[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double used) && double.TryParse(values[2], NumberStyles.Float, CultureInfo.InvariantCulture, out double total))
+			{
+				return (Math.Clamp(usage, 0.0, 100.0), $"VRAM {used:0} / {total:0} MB");
+			}
+		}
+		catch
+		{
+		}
+		return (-1.0, $"WPF RENDER TIER {RenderCapability.Tier >> 16} · UTIL N/A");
+	}
+
+	private static string FormatDataRate(double bytesPerSecond)
+	{
+		return bytesPerSecond >= 1024 * 1024 ? $"{bytesPerSecond / 1024 / 1024:0.0}M/s" : bytesPerSecond >= 1024 ? $"{bytesPerSecond / 1024:0.0}K/s" : $"{bytesPerSecond:0}B/s";
+	}
+
+	private void InitializeAudioVisualizer()
+	{
+		LinearGradientBrush fill = new LinearGradientBrush(System.Windows.Media.Color.FromRgb(240, 200, 135), System.Windows.Media.Color.FromRgb(80, 224, 242), 90.0);
+		for (int index = 0; index < 56; index++)
+		{
+			Border bar = new Border
+			{
+				Width = 6.0,
+				Height = 2.0,
+				MinHeight = 2.0,
+				VerticalAlignment = VerticalAlignment.Bottom,
+				HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+				Background = fill,
+				CornerRadius = new CornerRadius(1.0),
+				Opacity = 0.65
+			};
+			_audioBars.Add(bar);
+			AudioVisualizerBars.Children.Add(bar);
+		}
+	}
+
+	private async Task RefreshAudioVisualizerAsync()
+	{
+		if (_closing || _audioSampleInProgress)
+		{
+			return;
+		}
+		_audioSampleInProgress = true;
+		try
+		{
+			double peak = await Task.Run(QQMusicAudio.GetPeak);
+			if (peak < 0.0)
+			{
+				peak = 0.0;
+			}
+			_visualizerPhase += 0.22;
+			for (int index = 0; index < _audioBars.Count; index++)
+			{
+				Border bar = _audioBars[index];
+				double target = ComputeVisualizerBarHeight(peak, index, _audioBars.Count, _visualizerPhase);
+				bar.Height = bar.Height * 0.58 + target * 0.42;
+				bar.Opacity = Math.Clamp(0.45 + peak * 1.5, 0.45, 1.0);
+			}
+		}
+		finally
+		{
+			_audioSampleInProgress = false;
+		}
+	}
+
+	private static double ComputeVisualizerBarHeight(double peak, int index, int count, double phase)
+	{
+		// ponytail: one real output peak drives stylized bands; add WASAPI FFT only when true frequency bins are required.
+		double envelope = 0.35 + 0.65 * Math.Sin(Math.PI * (index + 1) / (count + 1));
+		double motion = 0.55 + 0.45 * Math.Abs(Math.Sin(phase + index * 0.61));
+		return Math.Clamp(2.0 + 5.0 * envelope * motion + Math.Clamp(peak, 0.0, 1.0) * 27.0 * envelope * motion, 2.0, 33.0);
+	}
+
+	private static ulong FileTimeToUInt64(System.Runtime.InteropServices.ComTypes.FILETIME value)
+	{
+		return ((ulong)(uint)value.dwHighDateTime << 32) | (uint)value.dwLowDateTime;
 	}
 
 	private async Task RefreshFolderCountAsync()
@@ -1014,6 +1255,7 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		_characterAnimationStarted = true;
 		CreateNaniteParticles();
+		CreateSignalNoise();
 
 		DoubleAnimation bob = new DoubleAnimation(-78.0, -66.0, new Duration(TimeSpan.FromSeconds(3.8)))
 		{
@@ -1094,6 +1336,10 @@ public partial class MainWindow : Window, IComponentConnector
 			RepeatBehavior = RepeatBehavior.Forever,
 			EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
 		});
+		TelemetrySweepRotate.BeginAnimation(RotateTransform.AngleProperty, new DoubleAnimation(0.0, 360.0, new Duration(TimeSpan.FromSeconds(3.6))) { RepeatBehavior = RepeatBehavior.Forever });
+		HologramBeam.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0.12, 0.3, new Duration(TimeSpan.FromSeconds(2.4))) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever });
+		HologramScanField.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0.1, 0.28, new Duration(TimeSpan.FromMilliseconds(170.0))) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever });
+		SignalNoiseLayer.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0.07, 0.24, new Duration(TimeSpan.FromMilliseconds(115.0))) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever });
 
 		_blinkTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4.8) };
 		_blinkTimer.Tick += delegate
@@ -1166,6 +1412,39 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
+	private void CreateSignalNoise()
+	{
+		if (SignalNoiseLayer.Children.Count > 0)
+		{
+			return;
+		}
+		for (int index = 0; index < 72; index++)
+		{
+			Border noise = new Border
+			{
+				Width = 2.0 + index % 7 * 3.0,
+				Height = index % 5 == 0 ? 2.0 : 1.0,
+				Background = index % 4 == 0 ? System.Windows.Media.Brushes.White : new SolidColorBrush(System.Windows.Media.Color.FromRgb(112, 232, 245)),
+				Opacity = 0.2 + index % 5 * 0.12,
+				IsHitTestVisible = false
+			};
+			SignalNoiseLayer.Children.Add(noise);
+		}
+		ShuffleSignalNoise();
+	}
+
+	private void ShuffleSignalNoise()
+	{
+		double width = Math.Max(CharacterStage.ActualWidth, 480.0);
+		double height = Math.Max(CharacterStage.ActualHeight, 760.0);
+		foreach (FrameworkElement noise in SignalNoiseLayer.Children.OfType<FrameworkElement>())
+		{
+			Canvas.SetLeft(noise, width * (0.08 + Random.Shared.NextDouble() * 0.84));
+			Canvas.SetTop(noise, height * (0.08 + Random.Shared.NextDouble() * 0.82));
+			noise.Opacity = 0.18 + Random.Shared.NextDouble() * 0.68;
+		}
+	}
+
 	private void PlayBlinkPulse()
 	{
 		DoubleAnimationUsingKeyFrames opacity = new DoubleAnimationUsingKeyFrames
@@ -1185,6 +1464,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void PlaySignalGlitch()
 	{
+		ShuffleSignalNoise();
 		DoubleAnimationUsingKeyFrames jitter = new DoubleAnimationUsingKeyFrames
 		{
 			Duration = new Duration(TimeSpan.FromMilliseconds(245.0))
@@ -1263,6 +1543,8 @@ public partial class MainWindow : Window, IComponentConnector
 			if (status == null || !status.RootElement.TryGetProperty("available", out JsonElement availableElement) || !availableElement.GetBoolean())
 			{
 				_musicSessionAvailable = false;
+				_musicSeekable = false;
+				MusicProgressSlider.IsEnabled = false;
 				MusicConnectionText.Text = Process.GetProcessesByName("QQMusic").Length > 0 ? "QQ 音乐已启动 · 等待播放信号" : "QQ 音乐未启动";
 				MusicTitleText.Text = "等待 QQ 音乐信号";
 				MusicArtistText.Text = string.IsNullOrWhiteSpace(_config.QQMusicPlaylistName) ? "开机续播 · 上次播放队列" : "开机续播 · " + _config.QQMusicPlaylistName;
@@ -1275,8 +1557,20 @@ public partial class MainWindow : Window, IComponentConnector
 			string artist = ReadJsonString(root, "artist");
 			string playbackStatus = ReadJsonString(root, "status");
 			_musicPlaying = string.Equals(playbackStatus, "Playing", StringComparison.OrdinalIgnoreCase);
-			_musicPositionSeconds = ReadJsonDouble(root, "position");
+			double reportedPosition = ReadJsonDouble(root, "position");
 			_musicDurationSeconds = Math.Max(0.0, ReadJsonDouble(root, "duration"));
+			_musicSeekable = root.TryGetProperty("seekable", out JsonElement seekableElement) && seekableElement.ValueKind == JsonValueKind.True;
+			if (_pendingSeekSeconds.HasValue && DateTime.UtcNow < _pendingSeekUntil && Math.Abs(reportedPosition - _pendingSeekSeconds.Value) > 2.0)
+			{
+				reportedPosition = _musicPositionSeconds;
+			}
+			else
+			{
+				_pendingSeekSeconds = null;
+			}
+			_musicPositionSeconds = reportedPosition;
+			MusicProgressSlider.IsEnabled = _musicSeekable && _musicDurationSeconds > 0.0;
+			MusicProgressSlider.ToolTip = _musicSeekable ? "拖动或点击跳转播放进度" : "当前 QQ 音乐媒体会话不支持跳转";
 			bool shuffle = root.TryGetProperty("shuffle", out JsonElement shuffleElement) && shuffleElement.ValueKind == JsonValueKind.True;
 			string repeat = ReadJsonString(root, "repeat");
 			_musicModeIndex = shuffle ? 3 : string.Equals(repeat, "Track", StringComparison.OrdinalIgnoreCase) ? 1 : string.Equals(repeat, "List", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
@@ -1398,17 +1692,28 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
-	private async Task ExecuteMusicCommandAsync(string command, string? value = null)
+	private async Task<bool> ExecuteMusicCommandAsync(string command, string? value = null, bool refresh = true)
 	{
 		MusicConnectionText.Text = "正在向 QQ 音乐发送控制指令";
 		using JsonDocument? result = await RunMusicBridgeAsync(command, value);
 		if (result == null)
 		{
 			MusicConnectionText.Text = "控制指令未被 QQ 音乐接收";
-			return;
+			return false;
 		}
-		await Task.Delay(260);
-		await RefreshMusicStatusAsync();
+		bool ok = !result.RootElement.TryGetProperty("ok", out JsonElement okElement) || okElement.ValueKind == JsonValueKind.True;
+		if (!ok)
+		{
+			string error = ReadJsonString(result.RootElement, "error");
+			MusicConnectionText.Text = string.IsNullOrWhiteSpace(error) ? "QQ 音乐拒绝了控制指令" : error;
+			return false;
+		}
+		if (refresh)
+		{
+			await Task.Delay(260);
+			await RefreshMusicStatusAsync();
+		}
+		return true;
 	}
 
 	private void MusicPreviousButton_Click(object sender, RoutedEventArgs e)
@@ -1433,6 +1738,11 @@ public partial class MainWindow : Window, IComponentConnector
 	private void MusicProgressSlider_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
 	{
 		_musicSeeking = true;
+		if (FindVisualAncestor<System.Windows.Controls.Primitives.Thumb>(e.OriginalSource as DependencyObject) == null && MusicProgressSlider.ActualWidth > 0.0)
+		{
+			double ratio = Math.Clamp(e.GetPosition(MusicProgressSlider).X / MusicProgressSlider.ActualWidth, 0.0, 1.0);
+			MusicProgressSlider.Value = MusicProgressSlider.Minimum + ratio * (MusicProgressSlider.Maximum - MusicProgressSlider.Minimum);
+		}
 	}
 
 	private async void MusicProgressSlider_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -1441,10 +1751,26 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			return;
 		}
+		double requestedPosition = Math.Clamp(MusicProgressSlider.Value, 0.0, _musicDurationSeconds);
 		_musicSeeking = false;
-		_musicPositionSeconds = MusicProgressSlider.Value;
+		_musicPositionSeconds = requestedPosition;
+		_pendingSeekSeconds = requestedPosition;
+		_pendingSeekUntil = DateTime.UtcNow.AddSeconds(3.0);
 		UpdateMusicProgressUi();
-		await ExecuteMusicCommandAsync("seek", _musicPositionSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+		bool ok = await ExecuteMusicCommandAsync("seek", requestedPosition.ToString("0.###", CultureInfo.InvariantCulture), refresh: false);
+		if (!ok)
+		{
+			_pendingSeekSeconds = null;
+			await RefreshMusicStatusAsync();
+			return;
+		}
+		await Task.Delay(900);
+		_pendingSeekSeconds = null;
+		await RefreshMusicStatusAsync();
+		if (Math.Abs(_musicPositionSeconds - requestedPosition) > 3.0)
+		{
+			MusicConnectionText.Text = "QQ 音乐未确认新的播放位置";
+		}
 	}
 
 	private void MusicProgressSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -2783,14 +3109,14 @@ public partial class MainWindow : Window, IComponentConnector
 			Hide();
 			return;
 		}
-		base.WindowState = WindowState.Maximized;
+		FitDesktopBounds();
 		Show();
 		AnchorDesktopLayer();
 	}
 
 	private void ShowFromTray()
 	{
-		base.WindowState = WindowState.Maximized;
+		FitDesktopBounds();
 		Show();
 		AnchorDesktopLayer();
 	}
@@ -2902,6 +3228,11 @@ public partial class MainWindow : Window, IComponentConnector
 		_clockTimer?.Stop();
 		_weatherTimer?.Stop();
 		_blinkTimer?.Stop();
+		_glitchTimer?.Stop();
+		_musicTimer?.Stop();
+		_musicVolumeTimer?.Stop();
+		_audioVisualizerTimer?.Stop();
+		_telemetryTimer?.Stop();
 		_weatherClient.Dispose();
 		if (_windowHandle != IntPtr.Zero)
 		{
@@ -2957,8 +3288,20 @@ public partial class MainWindow : Window, IComponentConnector
 		return false;
 	}
 
+	internal void FitDesktopBounds()
+	{
+		Rect workArea = SystemParameters.WorkArea;
+		Left = workArea.Left;
+		Top = workArea.Top;
+		Width = workArea.Width;
+		Height = workArea.Height;
+	}
+
 	[DllImport("user32.dll", SetLastError = true)]
 	private static extern bool RegisterHotKey(nint hWnd, int id, uint fsModifiers, uint vk);
+
+	[DllImport("kernel32.dll", SetLastError = true)]
+	private static extern bool GetSystemTimes(out System.Runtime.InteropServices.ComTypes.FILETIME idleTime, out System.Runtime.InteropServices.ComTypes.FILETIME kernelTime, out System.Runtime.InteropServices.ComTypes.FILETIME userTime);
 
 	[DllImport("user32.dll", SetLastError = true)]
 	private static extern bool UnregisterHotKey(nint hWnd, int id);

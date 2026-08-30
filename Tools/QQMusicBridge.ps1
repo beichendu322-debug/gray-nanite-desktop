@@ -69,6 +69,7 @@ try {
                 status = $info.PlaybackStatus.ToString()
                 position = $timeline.Position.TotalSeconds
                 duration = $timeline.EndTime.TotalSeconds
+                seekable = [bool]$info.Controls.IsPlaybackPositionEnabled
                 repeat = $repeat
                 shuffle = ($info.IsShuffleActive.HasValue -and $info.IsShuffleActive.Value)
             })
@@ -86,7 +87,12 @@ try {
         'previous' { Write-Result @{ ok = [bool](Await-WinRt ($session.TrySkipPreviousAsync()) ([bool])) } }
         'seek' {
             $seconds = [Math]::Max(0, [double]::Parse($Value, [Globalization.CultureInfo]::InvariantCulture))
-            Write-Result @{ ok = [bool](Await-WinRt ($session.TryChangePlaybackPositionAsync([TimeSpan]::FromSeconds($seconds).Ticks)) ([bool])) }
+            if (-not $session.GetPlaybackInfo().Controls.IsPlaybackPositionEnabled) {
+                Write-Result @{ ok = $false; error = 'QQ Music media session does not expose seeking.' }
+                break
+            }
+            $ok = [bool](Await-WinRt ($session.TryChangePlaybackPositionAsync([TimeSpan]::FromSeconds($seconds).Ticks)) ([bool]))
+            Write-Result @{ ok = $ok; error = if ($ok) { '' } else { 'QQ Music rejected the requested playback position.' } }
         }
         'mode' {
             $repeatType = [Windows.Media.MediaPlaybackAutoRepeatMode,Windows.Media,ContentType=WindowsRuntime]

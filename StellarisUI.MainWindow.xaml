@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<Window x:Class="StellarisUI.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:d="http://schemas.microsoft.com/expression/blend/2008" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" Title="灰风 · 纳米指挥终端" WindowStyle="None" ResizeMode="NoResize" WindowState="Maximized" Topmost="False" ShowActivated="False" ShowInTaskbar="False" Background="#070A0F" UseLayoutRounding="True" SnapsToDevicePixels="True" xmlns:stellarisui="clr-namespace:StellarisUI;assembly=StellarisUI">
+<Window x:Class="StellarisUI.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:d="http://schemas.microsoft.com/expression/blend/2008" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" Title="灰风 · 纳米指挥终端" WindowStyle="None" ResizeMode="NoResize" WindowState="Normal" WindowStartupLocation="Manual" Topmost="False" ShowActivated="False" ShowInTaskbar="False" Background="#070A0F" UseLayoutRounding="True" SnapsToDevicePixels="True" xmlns:stellarisui="clr-namespace:StellarisUI;assembly=StellarisUI">
   <FrameworkElement.Resources>
     <ResourceDictionary>
       <SolidColorBrush x:Key="LineSoft" Color="#26364049" />
@@ -101,7 +101,7 @@
       <Grid.RowDefinitions>
         <RowDefinition Height="84" />
         <RowDefinition Height="*" />
-        <RowDefinition Height="82" />
+        <RowDefinition Height="122" />
         <RowDefinition Height="24" />
       </Grid.RowDefinitions>
       <Border Grid.Row="0" Background="#E9080D13" BorderBrush="#4353606B" BorderThickness="0,0,0,1">
@@ -190,11 +190,79 @@
           </Border>
         </Grid>
         <Grid Column="1" Margin="18,-8,18,-12">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="154" />
+            <RowDefinition Height="*" />
+          </Grid.RowDefinitions>
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="6*" />
             <ColumnDefinition Width="5*" />
           </Grid.ColumnDefinitions>
-          <Border Grid.Column="0" HorizontalAlignment="Stretch" VerticalAlignment="Center" MaxWidth="780" Height="610" Margin="0,28,22,28" Background="#F20A1017" BorderBrush="#8094B0BC" BorderThickness="1" CornerRadius="5" Padding="18,14" Effect="{StaticResource PanelShadow}">
+          <Border Grid.Row="0" Grid.Column="0" Margin="0,6,22,4" Background="#E90A1118" BorderBrush="#607A929E" BorderThickness="1" CornerRadius="4" ClipToBounds="True">
+            <Grid Margin="12,9">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="142" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              <Grid Grid.Column="0" Width="124" Height="118" HorizontalAlignment="Left" VerticalAlignment="Center">
+                <Ellipse Width="108" Height="108" Stroke="#5977DDEA" StrokeThickness="1" />
+                <Ellipse Width="78" Height="78" Stroke="#4168B8C7" StrokeThickness="1" StrokeDashArray="3,5" />
+                <Ellipse Width="42" Height="42" Stroke="#667CEAF7" StrokeThickness="1" />
+                <Line X1="8" Y1="59" X2="116" Y2="59" Stroke="#4D71D7E5" />
+                <Line X1="62" Y1="5" X2="62" Y2="113" Stroke="#4D71D7E5" />
+                <Path Data="M62,59 L62,9 A50,50 0 0 1 105,84 Z" Fill="#286CE9F4" RenderTransformOrigin="0.5,0.5">
+                  <Path.RenderTransform><RotateTransform x:Name="TelemetrySweepRotate" Angle="0" /></Path.RenderTransform>
+                </Path>
+                <Ellipse Width="6" Height="6" Fill="{StaticResource Gold}" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="88,31,0,0" />
+                <TextBlock Text="SYS SCAN" FontFamily="Consolas" FontSize="8" Foreground="{StaticResource Cyan}" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,4" />
+              </Grid>
+              <Grid Grid.Column="1">
+                <Grid.RowDefinitions><RowDefinition Height="22" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <StackPanel Grid.ColumnSpan="2" Orientation="Horizontal">
+                  <TextBlock Text="TACTICAL SYSTEM SCAN" FontFamily="Consolas" FontSize="10" FontWeight="Bold" Foreground="{StaticResource Cyan}" />
+                  <TextBlock Name="TelemetryStatusText" Text="  //  ACQUIRING TELEMETRY" FontFamily="Consolas" FontSize="8" Foreground="{StaticResource Gold}" VerticalAlignment="Center" />
+                </StackPanel>
+                <Grid Grid.Row="1" Margin="0,2,8,0">
+                  <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                  <Border Background="#70142029" BorderBrush="#344E5D67" BorderThickness="1" CornerRadius="2" Padding="9,6" Margin="0,0,6,4">
+                    <StackPanel>
+                      <TextBlock Name="CpuValueText" Text="CPU  --%" FontFamily="Consolas" FontSize="13" FontWeight="Bold" Foreground="#FFFFFFFF" />
+                      <ProgressBar Name="CpuUsageBar" Minimum="0" Maximum="100" Value="0" Height="4" Foreground="{StaticResource Cyan}" Background="#26333E47" BorderThickness="0" Margin="0,5,0,0" />
+                      <TextBlock Text="SYSTEM PROCESSOR LOAD" FontFamily="Consolas" FontSize="7" Foreground="{StaticResource Faint}" Margin="0,4,0,0" />
+                    </StackPanel>
+                  </Border>
+                  <Border Grid.Row="1" Background="#70142029" BorderBrush="#344E5D67" BorderThickness="1" CornerRadius="2" Padding="9,6" Margin="0,0,6,0">
+                    <StackPanel>
+                      <TextBlock Name="NetworkRateText" Text="NET  --" FontFamily="Consolas" FontSize="13" FontWeight="Bold" Foreground="#FFFFFFFF" />
+                      <TextBlock Name="NetworkDetailText" Text="DOWN --  /  UP --" FontFamily="Consolas" FontSize="7.5" Foreground="{StaticResource Cyan}" Margin="0,5,0,0" />
+                    </StackPanel>
+                  </Border>
+                </Grid>
+                <Grid Grid.Row="1" Grid.Column="1" Margin="0,2,0,0">
+                  <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                  <Border Background="#70142029" BorderBrush="#344E5D67" BorderThickness="1" CornerRadius="2" Padding="9,6" Margin="0,0,0,4">
+                    <StackPanel>
+                      <TextBlock Name="GpuValueText" Text="GPU  --%" FontFamily="Consolas" FontSize="13" FontWeight="Bold" Foreground="#FFFFFFFF" />
+                      <ProgressBar Name="GpuUsageBar" Minimum="0" Maximum="100" Value="0" Height="4" Foreground="{StaticResource Gold}" Background="#26333E47" BorderThickness="0" Margin="0,5,0,0" />
+                      <TextBlock Name="GpuDetailText" Text="GRAPHICS LINK" FontFamily="Consolas" FontSize="7" Foreground="{StaticResource Faint}" Margin="0,4,0,0" />
+                    </StackPanel>
+                  </Border>
+                  <Border Grid.Row="1" Background="#70142029" BorderBrush="#344E5D67" BorderThickness="1" CornerRadius="2" Padding="9,6">
+                    <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                      <StackPanel>
+                        <TextBlock Text="CHRONO LINK" FontFamily="Consolas" FontSize="7" Foreground="{StaticResource Faint}" />
+                        <TextBlock Name="TelemetryTimeText" Text="00:00:00" FontFamily="Consolas" FontSize="14" FontWeight="Bold" Foreground="#FFFFFFFF" Margin="0,2,0,0" />
+                      </StackPanel>
+                      <TextBlock Grid.Column="1" Name="TelemetryDateText" Text="----.--.--" FontFamily="Consolas" FontSize="8" Foreground="{StaticResource Cyan}" VerticalAlignment="Center" />
+                    </Grid>
+                  </Border>
+                </Grid>
+              </Grid>
+            </Grid>
+          </Border>
+          <Border Grid.Row="1" Grid.Column="0" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MaxWidth="780" Margin="0,8,22,18" Background="#F20A1017" BorderBrush="#8094B0BC" BorderThickness="1" CornerRadius="5" Padding="18,14" Effect="{StaticResource PanelShadow}">
             <Grid>
               <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
@@ -247,7 +315,7 @@
               </Border>
             </Grid>
           </Border>
-          <Grid Name="CharacterStage" Grid.Column="1" ClipToBounds="True" Margin="8,0,0,0">
+          <Grid Name="CharacterStage" Grid.RowSpan="2" Grid.Column="1" ClipToBounds="True" Margin="8,0,0,0">
             <Ellipse Name="NaniteHalo" Width="410" Height="410" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="28,-170,0,0" Stroke="#6A69DDF1" StrokeThickness="1.4" StrokeDashArray="2,8" Opacity="0.25" IsHitTestVisible="False" RenderTransformOrigin="0.5,0.5">
               <UIElement.RenderTransform>
                 <TransformGroup>
@@ -257,10 +325,25 @@
               </UIElement.RenderTransform>
             </Ellipse>
             <Canvas Name="NaniteParticleLayer" IsHitTestVisible="False" ClipToBounds="True" />
-            <Grid Name="ProjectionBase" Width="390" Height="178" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="34,0,0,42" IsHitTestVisible="False" RenderTransformOrigin="0.5,0.68">
+            <Grid Name="HologramBeam" Width="450" Height="690" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="34,0,0,70" IsHitTestVisible="False" Opacity="0.24">
+              <Polygon Points="158,675 292,675 438,10 12,10">
+                <Polygon.Fill>
+                  <LinearGradientBrush StartPoint="0.5,1" EndPoint="0.5,0">
+                    <GradientStop Color="#526DEAF5" Offset="0" />
+                    <GradientStop Color="#176DEAF5" Offset="0.58" />
+                    <GradientStop Color="#006DEAF5" Offset="1" />
+                  </LinearGradientBrush>
+                </Polygon.Fill>
+              </Polygon>
+              <Line X1="158" Y1="675" X2="12" Y2="10" Stroke="#4B7CEAF7" StrokeThickness="1" StrokeDashArray="5,10" />
+              <Line X1="292" Y1="675" X2="438" Y2="10" Stroke="#4B7CEAF7" StrokeThickness="1" StrokeDashArray="5,10" />
+            </Grid>
+            <Grid Name="ProjectionBase" Width="430" Height="190" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="34,0,0,35" IsHitTestVisible="False" RenderTransformOrigin="0.5,0.68">
               <Grid.RenderTransform>
                 <ScaleTransform x:Name="ProjectionBaseScale" ScaleX="1" ScaleY="1" />
               </Grid.RenderTransform>
+              <Border Width="386" Height="28" VerticalAlignment="Bottom" Margin="0,0,0,8" Background="#D414222C" BorderBrush="#997CEAF7" BorderThickness="1" CornerRadius="4" />
+              <Border Width="340" Height="15" VerticalAlignment="Bottom" Margin="0,0,0,1" Background="#F0080D12" BorderBrush="#506A7C86" BorderThickness="1" CornerRadius="3" />
               <Polygon Points="130,4 260,4 342,145 48,145" Opacity="0.16">
                 <Polygon.Fill>
                   <LinearGradientBrush StartPoint="0.5,0" EndPoint="0.5,1">
@@ -289,6 +372,17 @@
               </Border>
               <TextBlock Text="NANITE HOLOGRAPHIC LINK // 07" FontFamily="Consolas" FontSize="8" Foreground="#C682F0FF" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,3" />
             </Grid>
+            <Rectangle Name="HologramScanField" Width="430" Height="650" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="34,-42,0,0" IsHitTestVisible="False" Opacity="0.22">
+              <Rectangle.Fill>
+                <DrawingBrush TileMode="Tile" Viewport="0,0,8,11" ViewportUnits="Absolute">
+                  <DrawingBrush.Drawing>
+                    <GeometryDrawing Brush="#427CEAF7">
+                      <GeometryDrawing.Geometry><RectangleGeometry Rect="0,0,8,1" /></GeometryDrawing.Geometry>
+                    </GeometryDrawing>
+                  </DrawingBrush.Drawing>
+                </DrawingBrush>
+              </Rectangle.Fill>
+            </Rectangle>
             <Image Name="CharacterGhostImage" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0" IsHitTestVisible="False" RenderOptions.BitmapScalingMode="HighQuality" RenderTransformOrigin="0.5,0.5">
               <Image.RenderTransform>
                 <TransformGroup>
@@ -309,6 +403,7 @@
                 </TransformGroup>
               </UIElement.RenderTransform>
             </Image>
+            <Canvas Name="SignalNoiseLayer" IsHitTestVisible="False" ClipToBounds="True" Opacity="0.18" />
             <Border Name="GlitchBandUpper" Width="420" Height="5" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="35,-230,0,0" Background="#A662E8F7" Opacity="0" IsHitTestVisible="False" RenderTransformOrigin="0.5,0.5">
               <Border.RenderTransform><TranslateTransform x:Name="GlitchBandUpperTranslate" /></Border.RenderTransform>
             </Border>
@@ -443,7 +538,9 @@
         </Grid>
       </Grid>
       <Border Grid.Row="2" Margin="18,4,18,5" Background="#F20A1017" BorderBrush="#667C929E" BorderThickness="1" CornerRadius="4" Effect="{StaticResource PanelShadow}">
-        <Grid Margin="14,7">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="76" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+          <Grid Grid.Row="0" Margin="14,7,14,2">
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="230" />
             <ColumnDefinition Width="148" />
@@ -482,6 +579,13 @@
             <Button Style="{StaticResource TerminalButton}" Content="绑定歌单" Padding="11,7" Click="BindMusicPlaylistButton_Click" ToolTip="保存 QQ 音乐歌单分享链接" />
             <Button Style="{StaticResource TerminalButton}" Content="打开 QQ 音乐 ↗" Margin="7,0,0,0" Padding="11,7" Click="OpenQQMusicButton_Click" />
           </StackPanel>
+          </Grid>
+          <Border Grid.Row="1" Margin="14,0,14,7" Background="#9A081118" BorderBrush="#3552636D" BorderThickness="1" CornerRadius="2" ClipToBounds="True">
+            <Grid>
+              <UniformGrid Name="AudioVisualizerBars" Rows="1" Margin="8,3,8,2" IsHitTestVisible="False" />
+              <TextBlock Text="LIVE AUDIO SPECTRUM  //  WINDOWS OUTPUT PEAK" FontFamily="Consolas" FontSize="7" Foreground="#8797B9C5" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,2,8,0" IsHitTestVisible="False" />
+            </Grid>
+          </Border>
         </Grid>
       </Border>
       <Border Grid.Row="3" Background="#FF05070A" BorderBrush="#26374049" BorderThickness="0,1,0,0">
