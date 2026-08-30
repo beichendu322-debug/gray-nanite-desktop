@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="256" viewBox="0 0 512 256" fill="none">
+  <title>Gray Nanite command terminal icon set</title>
+  <desc>Original monochrome vector marks for the command terminal. Cyan and amber are applied by the host UI.</desc>
+  <defs>
+    <style>.line{stroke:#72E5F5;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.muted{stroke:#94A5AE;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}</style>
+  </defs>
+  <g id="nanite-mark" transform="translate(16 16)"><circle class="line" cx="32" cy="32" r="25"/><circle class="muted" cx="32" cy="32" r="13"/><path class="line" d="M32 2v9M32 53v9M2 32h9M53 32h9M11 11l7 7M46 46l7 7M53 11l-7 7M18 46l-7 7"/></g>
+  <g id="games" transform="translate(96 16)"><path class="line" d="M10 42l5-22c1-5 5-8 10-8h14c5 0 9 3 10 8l5 22c1 5-5 8-9 5l-9-7H28l-9 7c-4 3-10 0-9-5Z"/><path class="muted" d="M22 24v10M17 29h10M42 27h.1M47 34h.1"/></g>
+  <g id="media" transform="translate(176 16)"><rect class="line" x="10" y="12" width="44" height="40" rx="4"/><path class="muted" d="M16 43l10-11 8 8 7-7 7 10M18 22h.1"/><circle class="line" cx="43" cy="23" r="4"/></g>
+  <g id="ai" transform="translate(256 16)"><path class="line" d="M32 9v9M32 46v9M9 32h9M46 32h9M15 15l6 6M43 43l6 6M49 15l-6 6M21 43l-6 6"/><circle class="line" cx="32" cy="32" r="13"/><circle class="muted" cx="32" cy="32" r="4"/></g>
+  <g id="social" transform="translate(336 16)"><circle class="line" cx="24" cy="25" r="8"/><circle class="muted" cx="43" cy="21" r="6"/><path class="line" d="M10 49c2-9 8-13 14-13s12 4 14 13M38 34c8 0 13 4 15 11"/></g>
+  <g id="tools" transform="translate(416 16)"><path class="line" d="M15 19l26 26M40 16a10 10 0 0 0-11 13l-14 14a7 7 0 1 0 10 10l14-14a10 10 0 0 0 13-11l-8 8-7-2-2-7 8-8Z"/></g>
+  <g id="history" transform="translate(56 96)"><path class="line" d="M12 29a21 21 0 1 0 7-15M12 12v15h15M32 20v13l8 5"/></g>
+  <g id="academic" transform="translate(136 96)"><path class="line" d="M8 24l24-12 24 12-24 12L8 24Z"/><path class="muted" d="M16 29v13c9 6 23 6 32 0V29M56 24v20"/><circle class="line" cx="56" cy="49" r="3"/></g>
+  <g id="inbox" transform="translate(216 96)"><path class="line" d="M10 20h44v30H10zM10 20l9-10h26l9 10M18 33h8l3 5h6l3-5h8"/></g>
+  <g id="recycle" transform="translate(296 96)"><path class="line" d="M32 10l7 12h-8M32 10L20 31h13M45 36l-7 12H24M45 36H30l-6 11M18 36l-13-1 7-12M18 36l-8-13"/></g>
+  <g id="codex" transform="translate(376 96)"><path class="line" d="M15 17l-12 15 12 15M49 17l12 15-12 15M39 10L25 54"/></g>
+  <g id="battery" transform="translate(56 176)"><rect class="line" x="8" y="18" width="43" height="28" rx="3"/><path class="line" d="M51 27h6v10h-6M15 25h20v14H15"/></g>
+  <g id="storage" transform="translate(136 176)"><ellipse class="line" cx="32" cy="17" rx="22" ry="7"/><path class="line" d="M10 17v24c0 4 10 7 22 7s22-3 22-7V17M10 29c0 4 10 7 22 7s22-3 22-7"/></g>
+  <g id="settings" transform="translate(216 176)"><circle class="line" cx="32" cy="32" r="9"/><path class="line" d="M32 8v8M32 48v8M8 32h8M48 32h8M15 15l6 6M43 43l6 6M49 15l-6 6M21 43l-6 6"/></g>
+  <g id="search" transform="translate(296 176)"><circle class="line" cx="28" cy="28" r="15"/><path class="line" d="M39 39l13 13"/></g>
+  <g id="refresh" transform="translate(376 176)"><path class="line" d="M49 26a18 18 0 0 0-31-8l-6 6M13 24V12h12M15 38a18 18 0 0 0 31 8l6-6M51 40v12H39"/></g>
+</svg>
