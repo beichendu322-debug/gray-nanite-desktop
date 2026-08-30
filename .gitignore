@@ -1,0 +1,26 @@
+# .NET build output
+bin/
+obj/
+artifacts/
+publish/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Generated packages and diagnostics
+*.exe
+*.dll
+*.pdb
+*.zip
+*.log
+runtime-self-test*.json
+
+# Windows metadata
+Thumbs.db
+Desktop.ini
+
