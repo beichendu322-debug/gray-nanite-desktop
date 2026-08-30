@@ -12,8 +12,7 @@ function Await-WinRt {
         Where-Object { $_.Name -eq 'AsTask' -and $_.IsGenericMethodDefinition -and $_.GetParameters().Count -eq 1 } |
         Select-Object -First 1
     $task = $method.MakeGenericMethod($ResultType).Invoke($null, @($Operation))
-    $task.Wait()
-    return $task.Result
+    return $task.GetAwaiter().GetResult()
 }
 
 function Send-MediaKey {

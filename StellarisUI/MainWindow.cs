@@ -1545,7 +1545,10 @@ public partial class MainWindow : Window, IComponentConnector
 				_musicSessionAvailable = false;
 				_musicSeekable = false;
 				MusicProgressSlider.IsEnabled = false;
-				MusicConnectionText.Text = Process.GetProcessesByName("QQMusic").Length > 0 ? "QQ 音乐已启动 · 等待播放信号" : "QQ 音乐未启动";
+				string bridgeError = status == null ? string.Empty : ReadJsonString(status.RootElement, "error").Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal).Trim();
+				if (bridgeError.Contains("指定的服务未安装", StringComparison.Ordinal) || bridgeError.Contains("service is not installed", StringComparison.OrdinalIgnoreCase)) bridgeError = "Windows 媒体控制服务不可用";
+				MusicConnectionText.Text = string.IsNullOrWhiteSpace(bridgeError) ? (Process.GetProcessesByName("QQMusic").Length > 0 ? "QQ 音乐已启动 · 等待播放信号" : "QQ 音乐未启动") : "媒体链路不可用 · " + bridgeError;
+				MusicProgressSlider.ToolTip = string.IsNullOrWhiteSpace(bridgeError) ? "等待 QQ 音乐媒体会话" : bridgeError;
 				MusicTitleText.Text = "等待 QQ 音乐信号";
 				MusicArtistText.Text = string.IsNullOrWhiteSpace(_config.QQMusicPlaylistName) ? "开机续播 · 上次播放队列" : "开机续播 · " + _config.QQMusicPlaylistName;
 				MusicPlayPauseButton.Content = "▶";
