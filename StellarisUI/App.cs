@@ -1,6 +1,7 @@
 using System;
 using System.CodeDom.Compiler;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -18,6 +19,19 @@ public class App : Application
 		if (e.Args.Any((string a) => string.Equals(a, "--self-test", StringComparison.OrdinalIgnoreCase)))
 		{
 			Environment.ExitCode = StellarisUI.MainWindow.RunSelfTest();
+			Shutdown();
+			return;
+		}
+		string? seekTest = e.Args.FirstOrDefault(argument => argument.StartsWith("--qq-seek-test=", StringComparison.OrdinalIgnoreCase));
+		if (seekTest != null && double.TryParse(seekTest[(seekTest.IndexOf('=') + 1)..], NumberStyles.Float, CultureInfo.InvariantCulture, out double seekSeconds))
+		{
+			Environment.ExitCode = QQMusicUiBridge.RunSeekTest(seekSeconds);
+			Shutdown();
+			return;
+		}
+		if (e.Args.Any(argument => string.Equals(argument, "--qq-play-collection-test", StringComparison.OrdinalIgnoreCase)))
+		{
+			Environment.ExitCode = QQMusicUiBridge.RunCollectionTest();
 			Shutdown();
 			return;
 		}

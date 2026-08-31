@@ -22,7 +22,9 @@ The overlay stays below normal application windows and is controlled through F10
 
 Gray's chat uses the local Codex CLI and inherits the user's Codex sandbox and approval configuration. Structured file actions remain limited to bound folders, reject junction/symlink escapes, never overwrite existing entries, and ask before launching executable content. Folder categorization supports destinations on another disk.
 
-The center HUD includes live system CPU, NVIDIA GPU/VRAM (when `nvidia-smi` is available), network throughput and clock telemetry. The character stage uses a holographic emitter, scanlines and signal-noise glitches. The music strip includes a Windows output peak visualizer, and its progress slider checks the QQ Music media session's seek capability and confirms the requested position.
+The center HUD includes live system CPU, NVIDIA GPU/VRAM (when `nvidia-smi` is available), network throughput and clock telemetry. The character stage uses a holographic emitter, scanlines and signal-noise glitches. The music strip includes a Windows output peak visualizer. Its progress slider uses the QQ Music media session when available and falls back to QQ Music's live Windows UI Automation timeline when GSMTC is unavailable.
+
+Use `绑定专辑 / 歌单` once to save an official `y.qq.com` album or playlist share link. On later launches the app opens that target and presses its collection play control automatically; the link is stored locally in `data/config.json`.
 
 For a nontechnical installation, follow [`FRIEND-SETUP-GUIDE.md`](FRIEND-SETUP-GUIDE.md).
 

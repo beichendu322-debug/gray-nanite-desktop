@@ -135,6 +135,8 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private bool _musicSeekable;
 
+	private bool _musicUiFallbackActive;
+
 	private double? _pendingSeekSeconds;
 
 	private DateTime _pendingSeekUntil;
@@ -1522,11 +1524,17 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			LaunchQQMusic(false, _config.QQMusicPlaylistLink);
 			await Task.Delay(TimeSpan.FromSeconds(4.5));
+			if (!string.IsNullOrWhiteSpace(_config.QQMusicPlaylistLink))
+			{
+				await Task.Run(QQMusicUiBridge.TryPlayCollection);
+				await Task.Delay(500);
+			}
 		}
 		await RefreshMusicStatusAsync();
 		if (_config.QQMusicAutoPlay && _musicSessionAvailable && !_musicPlaying)
 		{
-			await ExecuteMusicCommandAsync("play");
+			if (_musicUiFallbackActive) await Task.Run(QQMusicUiBridge.TryPlayPause);
+			else await ExecuteMusicCommandAsync("play");
 		}
 	}
 
@@ -1539,9 +1547,26 @@ public partial class MainWindow : Window, IComponentConnector
 		_musicRefreshInProgress = true;
 		try
 		{
+			if (_musicUiFallbackActive)
+			{
+				QQMusicUiStatus uiStatus = await Task.Run(QQMusicUiBridge.ReadStatus);
+				if (uiStatus.Available)
+				{
+					ApplyMusicUiStatus(uiStatus);
+					return;
+				}
+				_musicUiFallbackActive = false;
+			}
 			using JsonDocument? status = await RunMusicBridgeAsync("status");
 			if (status == null || !status.RootElement.TryGetProperty("available", out JsonElement availableElement) || !availableElement.GetBoolean())
 			{
+				QQMusicUiStatus uiStatus = await Task.Run(QQMusicUiBridge.ReadStatus);
+				if (uiStatus.Available)
+				{
+					_musicUiFallbackActive = true;
+					ApplyMusicUiStatus(uiStatus);
+					return;
+				}
 				_musicSessionAvailable = false;
 				_musicSeekable = false;
 				MusicProgressSlider.IsEnabled = false;
@@ -1554,6 +1579,7 @@ public partial class MainWindow : Window, IComponentConnector
 				MusicPlayPauseButton.Content = "▶";
 				return;
 			}
+			_musicUiFallbackActive = false;
 			_musicSessionAvailable = true;
 			JsonElement root = status.RootElement;
 			string title = ReadJsonString(root, "title");
@@ -1563,6 +1589,16 @@ public partial class MainWindow : Window, IComponentConnector
 			double reportedPosition = ReadJsonDouble(root, "position");
 			_musicDurationSeconds = Math.Max(0.0, ReadJsonDouble(root, "duration"));
 			_musicSeekable = root.TryGetProperty("seekable", out JsonElement seekableElement) && seekableElement.ValueKind == JsonValueKind.True;
+			if (!_musicSeekable)
+			{
+				QQMusicUiStatus uiStatus = await Task.Run(QQMusicUiBridge.ReadStatus);
+				if (uiStatus.Available)
+				{
+					_musicUiFallbackActive = true;
+					ApplyMusicUiStatus(uiStatus);
+					return;
+				}
+			}
 			if (_pendingSeekSeconds.HasValue && DateTime.UtcNow < _pendingSeekUntil && Math.Abs(reportedPosition - _pendingSeekSeconds.Value) > 2.0)
 			{
 				reportedPosition = _musicPositionSeconds;
@@ -1600,6 +1636,31 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			_musicRefreshInProgress = false;
 		}
+	}
+
+	private void ApplyMusicUiStatus(QQMusicUiStatus status)
+	{
+		_musicSessionAvailable = true;
+		_musicSeekable = true;
+		_musicPlaying = status.Playing;
+		_musicDurationSeconds = status.Duration;
+		double reportedPosition = status.Position;
+		if (_pendingSeekSeconds.HasValue && DateTime.UtcNow < _pendingSeekUntil && Math.Abs(reportedPosition - _pendingSeekSeconds.Value) > 2.0)
+		{
+			reportedPosition = _musicPositionSeconds;
+		}
+		else
+		{
+			_pendingSeekSeconds = null;
+		}
+		_musicPositionSeconds = reportedPosition;
+		MusicProgressSlider.IsEnabled = status.Duration > 0.0;
+		MusicProgressSlider.ToolTip = "拖动或点击跳转播放进度 · QQ MUSIC UI LINK";
+		MusicTitleText.Text = string.IsNullOrWhiteSpace(status.Title) || status.Title == "QQ音乐" ? "QQ 音乐播放队列" : status.Title;
+		MusicArtistText.Text = string.IsNullOrWhiteSpace(_config.QQMusicPlaylistName) ? "本地播放器控制" : _config.QQMusicPlaylistName;
+		MusicConnectionText.Text = status.Playing ? "QQ MUSIC UI LINK · PLAYING" : "QQ MUSIC UI LINK · PAUSED";
+		MusicPlayPauseButton.Content = status.Playing ? "Ⅱ" : "▶";
+		UpdateMusicProgressUi();
 	}
 
 	private static string ReadJsonString(JsonElement element, string name)
@@ -1721,12 +1782,14 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void MusicPreviousButton_Click(object sender, RoutedEventArgs e)
 	{
-		_ = ExecuteMusicCommandAsync("previous");
+		if (_musicUiFallbackActive) _ = Task.Run(QQMusicUiBridge.TryPrevious);
+		else _ = ExecuteMusicCommandAsync("previous");
 	}
 
 	private void MusicNextButton_Click(object sender, RoutedEventArgs e)
 	{
-		_ = ExecuteMusicCommandAsync("next");
+		if (_musicUiFallbackActive) _ = Task.Run(QQMusicUiBridge.TryNext);
+		else _ = ExecuteMusicCommandAsync("next");
 	}
 
 	private void MusicPlayPauseButton_Click(object sender, RoutedEventArgs e)
@@ -1735,7 +1798,8 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			LaunchQQMusic(true);
 		}
-		_ = ExecuteMusicCommandAsync("playpause");
+		if (_musicUiFallbackActive) _ = Task.Run(QQMusicUiBridge.TryPlayPause);
+		else _ = ExecuteMusicCommandAsync("playpause");
 	}
 
 	private void MusicProgressSlider_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -1760,7 +1824,14 @@ public partial class MainWindow : Window, IComponentConnector
 		_pendingSeekSeconds = requestedPosition;
 		_pendingSeekUntil = DateTime.UtcNow.AddSeconds(3.0);
 		UpdateMusicProgressUi();
-		bool ok = await ExecuteMusicCommandAsync("seek", requestedPosition.ToString("0.###", CultureInfo.InvariantCulture), refresh: false);
+		bool ok = _musicUiFallbackActive
+			? await Task.Run(() => QQMusicUiBridge.TrySeek(requestedPosition, _musicDurationSeconds))
+			: await ExecuteMusicCommandAsync("seek", requestedPosition.ToString("0.###", CultureInfo.InvariantCulture), refresh: false);
+		if (!ok && !_musicUiFallbackActive)
+		{
+			ok = await Task.Run(() => QQMusicUiBridge.TrySeek(requestedPosition, _musicDurationSeconds));
+			_musicUiFallbackActive = ok;
+		}
 		if (!ok)
 		{
 			_pendingSeekSeconds = null;
@@ -1804,18 +1875,18 @@ public partial class MainWindow : Window, IComponentConnector
 	private void BindMusicPlaylistButton_Click(object sender, RoutedEventArgs e)
 	{
 		System.Windows.Controls.TextBox holder = new System.Windows.Controls.TextBox { Text = _config.QQMusicPlaylistLink ?? string.Empty };
-		ShowTextEntryDialog(holder, "粘贴 QQ 音乐歌单分享链接（留空则续播上次队列）");
+		ShowTextEntryDialog(holder, "粘贴 QQ 音乐专辑或歌单分享链接（留空则续播上次队列）");
 		string link = holder.Text.Trim();
-		if (!string.IsNullOrEmpty(link) && (!Uri.TryCreate(link, UriKind.Absolute, out Uri? uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)))
+		if (!string.IsNullOrEmpty(link) && (!Uri.TryCreate(link, UriKind.Absolute, out Uri? uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) || !(uri.Host.Equals("y.qq.com", StringComparison.OrdinalIgnoreCase) || uri.Host.EndsWith(".y.qq.com", StringComparison.OrdinalIgnoreCase))))
 		{
-			MusicConnectionText.Text = "歌单链接格式不正确";
+			MusicConnectionText.Text = "请输入 QQ 音乐官方专辑或歌单链接";
 			return;
 		}
 		_config.QQMusicPlaylistLink = link;
-		_config.QQMusicPlaylistName = string.IsNullOrEmpty(link) ? "上次播放队列" : "已绑定歌单";
+		_config.QQMusicPlaylistName = string.IsNullOrEmpty(link) ? "上次播放队列" : "已绑定专辑 / 歌单";
 		SaveConfig();
 		MusicArtistText.Text = "开机续播 · " + _config.QQMusicPlaylistName;
-		MusicConnectionText.Text = string.IsNullOrEmpty(link) ? "已设为续播上次队列" : "歌单已绑定 · 请在 QQ 音乐中播放一次";
+		MusicConnectionText.Text = string.IsNullOrEmpty(link) ? "已设为续播上次队列" : "启动专辑 / 歌单已绑定";
 		if (!string.IsNullOrEmpty(link))
 		{
 			LaunchQQMusic(true, link);
@@ -1883,12 +1954,50 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 			}
 		}
+		string? installed = FindRegisteredQQMusic();
+		if (installed != null)
+		{
+			return installed;
+		}
 		string[] candidates =
 		{
 			Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Tencent", "QQMusic", "QQMusic.exe"),
 			Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tencent", "QQMusic", "QQMusic.exe")
 		};
 		return candidates.FirstOrDefault(File.Exists);
+	}
+
+	private static string? FindRegisteredQQMusic()
+	{
+		(RegistryHive Hive, RegistryView View)[] locations =
+		{
+			(RegistryHive.CurrentUser, RegistryView.Default),
+			(RegistryHive.LocalMachine, RegistryView.Registry64),
+			(RegistryHive.LocalMachine, RegistryView.Registry32)
+		};
+		foreach ((RegistryHive hive, RegistryView view) in locations)
+		{
+			try
+			{
+				using RegistryKey baseKey = RegistryKey.OpenBaseKey(hive, view);
+				using RegistryKey? uninstall = baseKey.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall");
+				if (uninstall == null) continue;
+				foreach (string subkeyName in uninstall.GetSubKeyNames())
+				{
+					using RegistryKey? product = uninstall.OpenSubKey(subkeyName);
+					if (product == null || !string.Equals(product.GetValue("DisplayName") as string, "QQ音乐", StringComparison.OrdinalIgnoreCase)) continue;
+					string? installLocation = product.GetValue("InstallLocation") as string;
+					string? executable = string.IsNullOrWhiteSpace(installLocation) ? null : Path.Combine(installLocation, "QQMusic.exe");
+					if (executable != null && File.Exists(executable)) return executable;
+					string? displayIcon = (product.GetValue("DisplayIcon") as string)?.Trim('"').Split(',')[0];
+					if (displayIcon != null && File.Exists(displayIcon)) return displayIcon;
+				}
+			}
+			catch
+			{
+			}
+		}
+		return null;
 	}
 
 	private void ConfigureButton_Click(object sender, RoutedEventArgs e)

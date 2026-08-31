@@ -576,7 +576,7 @@
             <Slider Name="MusicVolumeSlider" Grid.Column="1" Minimum="0" Maximum="100" Value="62" Height="28" VerticalAlignment="Center" Foreground="{StaticResource Cyan}" ValueChanged="MusicVolumeSlider_ValueChanged" />
           </Grid>
           <StackPanel Grid.Column="7" Orientation="Horizontal" VerticalAlignment="Center">
-            <Button Style="{StaticResource TerminalButton}" Content="绑定歌单" Padding="11,7" Click="BindMusicPlaylistButton_Click" ToolTip="保存 QQ 音乐歌单分享链接" />
+            <Button Style="{StaticResource TerminalButton}" Content="绑定专辑 / 歌单" Padding="11,7" Click="BindMusicPlaylistButton_Click" ToolTip="保存开机自动播放的 QQ 音乐专辑或歌单分享链接" />
             <Button Style="{StaticResource TerminalButton}" Content="打开 QQ 音乐 ↗" Margin="7,0,0,0" Padding="11,7" Click="OpenQQMusicButton_Click" />
           </StackPanel>
           </Grid>
