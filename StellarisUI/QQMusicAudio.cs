@@ -8,11 +8,12 @@ namespace StellarisUI;
 internal static class QQMusicAudio
 {
 	private static readonly Guid AudioSessionManager2Guid = new("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
+	private static readonly Guid AudioMeterGuid = new("C02216F6-8C67-4B5B-9D00-D008E73E0064");
 	private static readonly string[] ProcessNames = { "QQMusic", "QQMusicSvr" };
 
 	public static double GetVolume()
 	{
-		ISimpleAudioVolume? volume = FindVolume();
+		ISimpleAudioVolume? volume = FindSession<ISimpleAudioVolume>();
 		if (volume == null)
 		{
 			return -1.0;
@@ -30,7 +31,7 @@ internal static class QQMusicAudio
 
 	public static bool SetVolume(double percent)
 	{
-		ISimpleAudioVolume? volume = FindVolume();
+		ISimpleAudioVolume? volume = FindSession<ISimpleAudioVolume>();
 		if (volume == null)
 		{
 			return false;
@@ -47,7 +48,48 @@ internal static class QQMusicAudio
 		}
 	}
 
-	private static ISimpleAudioVolume? FindVolume()
+	public static double GetPeak()
+	{
+		IAudioMeterInformation? meter = FindSession<IAudioMeterInformation>() ?? FindEndpointMeter();
+		if (meter == null)
+		{
+			return -1.0;
+		}
+		try
+		{
+			meter.GetPeakValue(out float peak);
+			return Math.Clamp(peak, 0f, 1f);
+		}
+		finally
+		{
+			Marshal.FinalReleaseComObject(meter);
+		}
+	}
+
+	private static IAudioMeterInformation? FindEndpointMeter()
+	{
+		IMMDeviceEnumerator? enumerator = null;
+		IMMDevice? device = null;
+		try
+		{
+			enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+			enumerator.GetDefaultAudioEndpoint(0, 1, out device);
+			Guid iid = AudioMeterGuid;
+			device.Activate(ref iid, 23, IntPtr.Zero, out object meter);
+			return meter as IAudioMeterInformation;
+		}
+		catch
+		{
+			return null;
+		}
+		finally
+		{
+			if (device != null) Marshal.FinalReleaseComObject(device);
+			if (enumerator != null) Marshal.FinalReleaseComObject(enumerator);
+		}
+	}
+
+	private static T? FindSession<T>() where T : class
 	{
 		IMMDeviceEnumerator? enumerator = null;
 		IMMDevice? device = null;
@@ -78,7 +120,7 @@ internal static class QQMusicAudio
 						using Process process = Process.GetProcessById((int)processId);
 						if (ProcessNames.Any(name => string.Equals(name, process.ProcessName, StringComparison.OrdinalIgnoreCase)))
 						{
-							ISimpleAudioVolume? result = control as ISimpleAudioVolume;
+							T? result = control as T;
 							if (result != null)
 							{
 								retainControl = true;
@@ -178,5 +220,14 @@ internal static class QQMusicAudio
 		int GetMasterVolume(out float level);
 		int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, ref Guid context);
 		int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
+	}
+
+	[ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064")]
+	private interface IAudioMeterInformation
+	{
+		int GetPeakValue(out float peak);
+		int GetMeteringChannelCount(out int channelCount);
+		int GetChannelsPeakValues(int channelCount, [Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)] float[] peakValues);
+		int QueryHardwareSupport(out int hardwareSupportMask);
 	}
 }

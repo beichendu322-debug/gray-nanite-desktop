@@ -8,6 +8,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
+using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -76,9 +77,17 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private DispatcherTimer? _musicVolumeTimer;
 
+	private DispatcherTimer? _audioVisualizerTimer;
+
+	private DispatcherTimer? _telemetryTimer;
+
 	private readonly HttpClient _weatherClient = CreateWeatherClient();
 
 	private bool _weatherRefreshInProgress;
+
+	private bool _folderCountRefreshInProgress;
+
+	private int _folderCountTick;
 
 	private Process? _codexProcess;
 
@@ -106,6 +115,49 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private bool _characterAnimationStarted;
 
+	private readonly CharacterExpressionAssets _characterExpressions = new();
+
+	private readonly CharacterExpressionState _characterExpressionState = new();
+
+	private CharacterVoiceInteraction? _characterVoice;
+
+	private CharacterHitMap? _characterHitMap;
+
+	private CharacterHitGeometry _characterLookGeometry = CharacterHitGeometry.Master;
+
+	// Sprite transitions: the outgoing sprite is kept on a non-interactive layer above
+	// CharacterImage (sharing its transforms) and dissolved, and touch reactions linger
+	// briefly after the voice line ends before easing back to the ambient look.
+	private System.Windows.Controls.Image? _characterFadeImage;
+
+	private readonly TranslateTransform _characterSwapLift = new TranslateTransform();
+
+	private DispatcherTimer? _characterLingerTimer;
+
+	private CharacterLook _shownLook;
+
+	private long _characterCrossfadeUntil;
+
+	// Set when the session locks mid-run: a fresh PRTS overlay covers the desktop and plays
+	// once the user is back on the desktop.
+	private bool _relockIntroPending;
+
+	private TaskCompletionSource? _unlockSignal;
+
+	private static readonly TimeSpan ExpressionFadeTime = TimeSpan.FromMilliseconds(320.0);
+
+	private static readonly TimeSpan PoseFadeTime = TimeSpan.FromMilliseconds(620.0);
+
+	private static readonly TimeSpan ExpressionLingerTime = TimeSpan.FromMilliseconds(1200.0);
+
+	private static readonly TimeSpan PoseLingerTime = TimeSpan.FromMilliseconds(1800.0);
+
+	private BitmapSource? _characterHitSource;
+
+	private StartupBootOverlay? _startupOverlay;
+
+	private bool _startupInitialized;
+
 	private int _blinkCycle;
 
 	private int _glitchCycle;
@@ -124,15 +176,54 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private bool _musicUiReady;
 
+	private bool _musicSeekable;
+
+	private bool _musicUiFallbackActive;
+
+	private double? _pendingSeekSeconds;
+
+	private DateTime _pendingSeekUntil;
+
 	private double _musicPositionSeconds;
 
 	private double _musicDurationSeconds;
 
 	private int _musicModeIndex;
 
+	private readonly List<Border> _audioBars = new();
+
+	private bool _audioSampleInProgress;
+
+	private double _visualizerPhase;
+
+	private bool _telemetryRefreshInProgress;
+
+	private bool _cpuSampleReady;
+
+	private ulong _previousCpuIdle;
+
+	private ulong _previousCpuKernel;
+
+	private ulong _previousCpuUser;
+
+	private long _previousNetworkReceived;
+
+	private long _previousNetworkSent;
+
+	private DateTime _previousNetworkSample = DateTime.UtcNow;
+
+	private double _networkDownRate;
+
+	private double _networkUpRate;
+
 	private static readonly string[] MusicModeKeys = { "sequence", "repeat-one", "repeat-all", "shuffle" };
 
 	private static readonly string[] MusicModeLabels = { "顺序播放", "单曲循环", "列表循环", "随机播放" };
+
+	private static readonly HashSet<string> ExecutableExtensions = new(StringComparer.OrdinalIgnoreCase)
+	{
+		".appref-ms", ".bat", ".cmd", ".com", ".cpl", ".exe", ".hta", ".js", ".jse", ".lnk", ".msi", ".msp", ".ps1", ".reg", ".scr", ".url", ".vbs", ".wsf", ".wsh"
+	};
 
 	private NotifyIcon? _trayIcon;
 
@@ -143,10 +234,6 @@ public partial class MainWindow : Window, IComponentConnector
 	private const int HotkeyId = 18960;
 
 	private const int WmHotkey = 786;
-
-	private const int WmMouseActivate = 33;
-
-	private const int MaNoActivate = 3;
 
 	private const uint ModNoRepeat = 16384u;
 
@@ -192,13 +279,28 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private const uint WinEventSkipOwnProcess = 2u;
 
-	public MainWindow()
+	public MainWindow(bool skipIntro = false)
 	{
 		InitializeComponent();
+		InitializeCharacterCrossfade();
+		if (!skipIntro && Content is System.Windows.Controls.Grid desktopRoot)
+		{
+			_startupOverlay = new StartupBootOverlay(_baseDirectory);
+			System.Windows.Controls.Panel.SetZIndex(_startupOverlay, int.MaxValue);
+			desktopRoot.Children.Add(_startupOverlay);
+		}
+		InitializeAudioVisualizer();
 		RemoveUnneededHud();
 		FileList.SelectionMode = System.Windows.Controls.SelectionMode.Extended;
 		_projectDirectory = FindProjectDirectory(_baseDirectory);
 		LoadCharacterMood("idle");
+		_characterVoice = new CharacterVoiceInteraction(_baseDirectory,
+			CharacterVoiceStarted,
+			error => AssistantMessage.Text = error,
+			CharacterVoiceStopped);
+		CharacterImage.MouseLeftButtonUp += CharacterImage_MouseLeftButtonUp;
+		CharacterImage.Cursor = System.Windows.Input.Cursors.Hand;
+		IsVisibleChanged += (_, _) => { if (!IsVisible) _characterVoice?.Stop(); };
 		CommandBackdrop.Source = LoadImageAsset("background-command.png");
 		InitializeTrayIcon();
 		_config = LoadConfig();
@@ -218,10 +320,13 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			Interval = TimeSpan.FromSeconds(1L)
 		};
-		_clockTimer.Tick += delegate
+		_clockTimer.Tick += async delegate
 		{
 			UpdateSystemStatus();
-			AnchorDesktopLayer();
+			if (++_folderCountTick % 15 == 0)
+			{
+				await RefreshFolderCountAsync();
+			}
 		};
 		_clockTimer.Start();
 		_weatherTimer = new DispatcherTimer
@@ -262,26 +367,66 @@ public partial class MainWindow : Window, IComponentConnector
 			SaveConfig();
 			await Task.Run(() => QQMusicAudio.SetVolume(volume));
 		};
+		_audioVisualizerTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(90.0) };
+		_audioVisualizerTimer.Tick += async delegate { await RefreshAudioVisualizerAsync(); };
+		_telemetryTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.0) };
+		_telemetryTimer.Tick += async delegate { await RefreshTelemetryAsync(); };
 		base.Loaded += async delegate
 		{
-			StartCharacterAnimation();
-			await RefreshWeatherAsync();
-			_weatherTimer?.Start();
-			await InitializeMusicAsync();
-			_musicTimer?.Start();
+			// Hide/Show can raise Loaded again. Never replay the intro or launch music twice.
+			if (_startupInitialized || _closing) return;
+			_startupInitialized = true;
+			try
+			{
+				StartCharacterAnimation();
+				StartupBootOverlay? intro = _startupOverlay;
+				if (intro != null)
+				{
+					// Autostart can run while Windows is still on the lock/sign-in screen. Hold the
+					// intro (and everything gated behind it, including music) until the user is in.
+					try { await WaitForInteractiveDesktopAsync(); }
+					catch (Exception ex) { App.LogStartup("Startup desktop gate skipped: " + ex.Message); }
+					if (_closing) return;
+					try { await intro.PlayAsync(); }
+					catch (Exception ex) { App.LogStartup("Startup intro fallback: " + ex.Message); }
+					finally
+					{
+						intro.Dispose();
+						if (Content is System.Windows.Controls.Grid root) root.Children.Remove(intro);
+						_startupOverlay = null;
+					}
+				}
+				if (_closing) return;
+				App.LogStartup("Startup intro gate released; initializing QQ Music");
+				await InitializeMusicAsync();
+				if (_closing) return;
+				_musicTimer?.Start();
+				await RefreshTelemetryAsync();
+				if (_closing) return;
+				_telemetryTimer?.Start();
+				_audioVisualizerTimer?.Start();
+				await RefreshFolderCountAsync();
+				if (_closing) return;
+				await RefreshWeatherAsync();
+				if (!_closing) _weatherTimer?.Start();
+			}
+			catch (Exception ex)
+			{
+				App.LogStartup("Desktop services initialization failed: " + ex);
+				if (!_closing) MusicConnectionText.Text = "自动初始化未完成 · 可手动连接 QQ 音乐";
+			}
 		};
 		base.SourceInitialized += delegate
 		{
 			RegisterHotkey();
 		};
+		SystemEvents.SessionSwitch += OnSessionSwitch;
 		base.PreviewKeyDown += Window_PreviewKeyDown;
-		base.Activated += delegate
+		base.Closing += delegate
 		{
-			ScheduleDesktopLayerSync();
-		};
-		base.Deactivated += delegate
-		{
-			ScheduleDesktopLayerSync();
+			_closing = true;
+			_characterVoice?.Stop();
+			_startupOverlay?.Dispose();
 		};
 		base.Closed += delegate
 		{
@@ -289,10 +434,227 @@ public partial class MainWindow : Window, IComponentConnector
 		};
 	}
 
+	private void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
+	{
+		// Raised on the SystemEvents thread.
+		SessionSwitchReason reason = e.Reason;
+		try
+		{
+			Dispatcher.BeginInvoke(new Action(() => HandleSessionSwitch(reason)));
+		}
+		catch (Exception)
+		{
+		}
+	}
+
+	private void HandleSessionSwitch(SessionSwitchReason reason)
+	{
+		if (_closing || !_startupInitialized) return;
+		if (reason == SessionSwitchReason.SessionLock)
+		{
+			// Leave a first-boot intro (still running or waiting) alone; only re-arm once
+			// the desktop is up and showing.
+			if (_startupOverlay != null || !IsVisible || Content is not System.Windows.Controls.Grid root) return;
+			_characterVoice?.Stop();
+			StartupBootOverlay cover = new StartupBootOverlay(_baseDirectory);
+			System.Windows.Controls.Panel.SetZIndex(cover, int.MaxValue);
+			root.Children.Add(cover);
+			_startupOverlay = cover;
+			_relockIntroPending = true;
+			_unlockSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+			App.LogStartup("Session locked; PRTS intro armed for unlock");
+			_ = PlayRelockIntroAsync(cover, _unlockSignal);
+		}
+		else if (reason == SessionSwitchReason.SessionUnlock && _relockIntroPending)
+		{
+			App.LogStartup("Session unlock event received");
+			_unlockSignal?.TrySetResult();
+		}
+	}
+
+	private async Task PlayRelockIntroAsync(StartupBootOverlay intro, TaskCompletionSource unlocked)
+	{
+		// Three independent ways back in, so the black cover can never get stuck:
+		// the SessionUnlock event, the desktop gate going locked -> ready again, or real input.
+		bool sawLocked = false;
+		DispatcherTimer poll = new DispatcherTimer(DispatcherPriority.Background)
+		{
+			Interval = TimeSpan.FromMilliseconds(500.0)
+		};
+		poll.Tick += delegate
+		{
+			if (_closing) { unlocked.TrySetResult(); return; }
+			bool ready = IsInteractiveDesktopReady(out _);
+			if (!ready) sawLocked = true;
+			else if (sawLocked) unlocked.TrySetResult();
+		};
+		System.Windows.Input.KeyEventHandler keyed = delegate { unlocked.TrySetResult(); };
+		MouseButtonEventHandler clicked = delegate { unlocked.TrySetResult(); };
+		PreviewKeyDown += keyed;
+		PreviewMouseDown += clicked;
+		poll.Start();
+		try
+		{
+			await unlocked.Task;
+			poll.Stop();
+			PreviewKeyDown -= keyed;
+			PreviewMouseDown -= clicked;
+			_relockIntroPending = false;
+			if (_closing) return;
+			IsInteractiveDesktopReady(out string state);
+			App.LogStartup("Session back on desktop; " + state);
+			// Same settle as first boot so Explorer finishes repainting before the voice starts.
+			await Task.Delay(900);
+			if (_closing) return;
+			App.LogStartup("Replaying PRTS intro after unlock");
+			await intro.PlayAsync();
+		}
+		catch (Exception ex)
+		{
+			App.LogStartup("Unlock intro fallback: " + ex.Message);
+		}
+		finally
+		{
+			poll.Stop();
+			PreviewKeyDown -= keyed;
+			PreviewMouseDown -= clicked;
+			_relockIntroPending = false;
+			if (ReferenceEquals(_unlockSignal, unlocked)) _unlockSignal = null;
+			intro.Dispose();
+			if (Content is System.Windows.Controls.Grid root) root.Children.Remove(intro);
+			if (ReferenceEquals(_startupOverlay, intro)) _startupOverlay = null;
+		}
+	}
+
+	private async Task WaitForInteractiveDesktopAsync()
+	{
+		if (IsInteractiveDesktopReady(out string state))
+		{
+			App.LogStartup("Startup desktop gate open; " + state);
+			return;
+		}
+		App.LogStartup("PRTS intro waiting for sign-in; " + state);
+		TaskCompletionSource ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+		DispatcherTimer poll = new DispatcherTimer(DispatcherPriority.Background)
+		{
+			Interval = TimeSpan.FromMilliseconds(500.0)
+		};
+		poll.Tick += delegate
+		{
+			if (_closing || IsInteractiveDesktopReady(out _)) ready.TrySetResult();
+		};
+		// Failsafe: real key presses or clicks only reach this window once the user is in.
+		System.Windows.Input.KeyEventHandler keyed = delegate { ready.TrySetResult(); };
+		MouseButtonEventHandler clicked = delegate { ready.TrySetResult(); };
+		PreviewKeyDown += keyed;
+		PreviewMouseDown += clicked;
+		poll.Start();
+		try
+		{
+			await ready.Task;
+		}
+		finally
+		{
+			poll.Stop();
+			PreviewKeyDown -= keyed;
+			PreviewMouseDown -= clicked;
+		}
+		if (_closing) return;
+		IsInteractiveDesktopReady(out state);
+		App.LogStartup("PRTS intro released after sign-in; " + state);
+		// Let Explorer finish painting the desktop so the intro and voice do not stutter.
+		await Task.Delay(900);
+	}
+
+	internal static bool IsInteractiveDesktopReady(out string state)
+	{
+		bool? inputDefault = QueryInputDesktopIsDefault();
+		bool? lockApp = QueryForegroundIsLockApp();
+		// Logged only: on this machine WTSSessionInfoEx reported "locked" while the desktop
+		// was in use, so it must not decide anything.
+		bool? wtsLocked = QuerySessionLocked();
+		state = "inputDesktopDefault=" + (inputDefault?.ToString() ?? "unknown") + "; foregroundLockApp=" + (lockApp?.ToString() ?? "unknown")
+			+ "; wtsLocked(info)=" + (wtsLocked?.ToString() ?? "unknown");
+		// The sign-in prompt lives on the secure Winlogon desktop, which a user process cannot
+		// open; the lock-screen curtain is LockApp in the foreground. Either means "not yet in".
+		return inputDefault != false && lockApp != true;
+	}
+
+	private static bool? QueryForegroundIsLockApp()
+	{
+		try
+		{
+			IntPtr window = GetForegroundWindow();
+			if (window == IntPtr.Zero) return null;
+			GetWindowThreadProcessId(window, out uint processId);
+			if (processId == 0) return null;
+			using Process process = Process.GetProcessById((int)processId);
+			return string.Equals(process.ProcessName, "LockApp", StringComparison.OrdinalIgnoreCase);
+		}
+		catch (Exception)
+		{
+			return null;
+		}
+	}
+
+	private static bool? QuerySessionLocked()
+	{
+		try
+		{
+			// WTSSessionInfoEx (25): WTSINFOEXW { DWORD Level; union Data }. The union holds
+			// LARGE_INTEGER times, so it is 8-byte aligned: Data starts at offset 8 and
+			// WTSINFOEX_LEVEL1_W is SessionId (+8), SessionState (+12), SessionFlags (+16).
+			if (!WTSQuerySessionInformationW(IntPtr.Zero, -1, 25, out IntPtr buffer, out int bytes) || buffer == IntPtr.Zero) return null;
+			try
+			{
+				if (bytes < 20 || Marshal.ReadInt32(buffer, 0) != 1) return null;
+				int flags = Marshal.ReadInt32(buffer, 16);
+				if (flags == 0) return true;
+				if (flags == 1) return false;
+				return null;
+			}
+			finally
+			{
+				WTSFreeMemory(buffer);
+			}
+		}
+		catch (Exception)
+		{
+			return null;
+		}
+	}
+
+	private static bool? QueryInputDesktopIsDefault()
+	{
+		IntPtr desktop = IntPtr.Zero;
+		try
+		{
+			desktop = OpenInputDesktop(0u, false, 0x0001u);
+			if (desktop == IntPtr.Zero) return false;
+			StringBuilder name = new StringBuilder(64);
+			if (!GetUserObjectInformation(desktop, 2, name, name.Capacity * 2, out _)) return null;
+			return string.Equals(name.ToString(), "Default", StringComparison.OrdinalIgnoreCase);
+		}
+		catch (Exception)
+		{
+			return null;
+		}
+		finally
+		{
+			if (desktop != IntPtr.Zero) CloseDesktop(desktop);
+		}
+	}
+
 	public static int RunSelfTest()
 	{
 		try
 		{
+			StartupBootOverlay.ValidateAssetsAndTiming();
+			App.LogStartup("Self-test desktop gate: ready=" + IsInteractiveDesktopReady(out string desktopGate) + "; " + desktopGate);
+			CharacterAssetValidator.Validate();
+			CharacterExpressionAssets.Validate();
+			CharacterExpressionInteractionValidator.Validate();
+			CharacterVoiceInteraction.ValidateAssets(AppContext.BaseDirectory);
 			using (JsonDocument responseSchema = JsonDocument.Parse(ResponseSchema))
 			{
 				JsonElement actionTypes = responseSchema.RootElement.GetProperty("properties").GetProperty("actions").GetProperty("items").GetProperty("properties").GetProperty("type").GetProperty("enum");
@@ -310,12 +672,21 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 			embeddedResources.ReleaseAllResources();
 			string musicBridge = Path.Combine(AppContext.BaseDirectory, "Tools", "QQMusicBridge.ps1");
-			if (!File.Exists(musicBridge) || !File.ReadAllText(musicBridge, Encoding.UTF8).Contains("TryChangePlaybackPositionAsync", StringComparison.Ordinal))
+			if (!File.Exists(musicBridge) || !File.ReadAllText(musicBridge, Encoding.UTF8).Contains("IsPlaybackPositionEnabled", StringComparison.Ordinal))
 			{
 				throw new InvalidOperationException("QQ Music bridge is missing or incomplete");
 			}
+			if (ComputeVisualizerBarHeight(0.8, 12, 56, 1.0) <= ComputeVisualizerBarHeight(0.0, 12, 56, 1.0) || FormatDataRate(2 * 1024 * 1024) != "2.0M/s")
+			{
+				throw new InvalidOperationException("telemetry visualizer helpers failed");
+			}
+			double audioPeak = QQMusicAudio.GetPeak();
+			if (audioPeak < -1.0 || audioPeak > 1.0)
+			{
+				throw new InvalidOperationException("Windows audio peak meter returned an invalid value");
+			}
 			AppConfig config = AppConfig.CreateDefault(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
-			if (config.ConfigVersion != 11 || !config.StartWithWindows || !config.QQMusicAutoStart || !config.QQMusicAutoPlay || config.QQMusicVolume <= 0.0 || config.Folders.Count != 8 || config.Folders.Any((FolderBinding f) => string.IsNullOrWhiteSpace(f.TerminalName)) || config.Folders.All((FolderBinding f) => f.Id != "inbox"))
+			if (config.ConfigVersion != 11 || config.StartWithWindows || !config.QQMusicAutoStart || !config.QQMusicAutoPlay || config.QQMusicVolume <= 0.0 || config.Folders.Count != 8 || config.Folders.Any((FolderBinding f) => string.IsNullOrWhiteSpace(f.TerminalName)) || config.Folders.All((FolderBinding f) => f.Id != "inbox"))
 			{
 				throw new InvalidOperationException("default folder bindings are incomplete");
 			}
@@ -327,7 +698,7 @@ public partial class MainWindow : Window, IComponentConnector
 			legacy.ConfigVersion = 9;
 			legacy.StartWithWindows = false;
 			legacy.Folders.RemoveAll((FolderBinding folder) => folder.Id == "inbox");
-			if (!UpgradeConfig(legacy, "D:\\Desktop") || legacy.ConfigVersion != 11 || !legacy.StartWithWindows || !legacy.QQMusicAutoStart || !legacy.QQMusicAutoPlay || legacy.Folders.Count != 8)
+			if (!UpgradeConfig(legacy, "D:\\Desktop") || legacy.ConfigVersion != 11 || legacy.StartWithWindows || !legacy.QQMusicAutoStart || !legacy.QQMusicAutoPlay || legacy.Folders.Count != 8)
 			{
 				throw new InvalidOperationException("legacy startup migration failed");
 			}
@@ -343,6 +714,36 @@ public partial class MainWindow : Window, IComponentConnector
 			if (IsAllowedPath("C:\\other", new[] { "D:\\project" }))
 			{
 				throw new InvalidOperationException("allowed path check is too broad");
+			}
+			string authorizationRoot = Path.Combine(Path.GetTempPath(), $"gray-root-{Guid.NewGuid():N}");
+			string authorizationOutside = Path.Combine(Path.GetTempPath(), $"gray-outside-{Guid.NewGuid():N}");
+			string authorizationLink = Path.Combine(authorizationRoot, "link");
+			try
+			{
+				Directory.CreateDirectory(authorizationRoot);
+				Directory.CreateDirectory(authorizationOutside);
+				try
+				{
+					Directory.CreateSymbolicLink(authorizationLink, authorizationOutside);
+					if (IsAllowedPath(Path.Combine(authorizationLink, "escape.txt"), new[] { authorizationRoot }))
+					{
+						throw new InvalidOperationException("reparse-point path escaped the allowed root");
+					}
+				}
+				catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+				{
+					// Windows without Developer Mode may not permit this optional regression check.
+				}
+			}
+			finally
+			{
+				if (Directory.Exists(authorizationLink)) Directory.Delete(authorizationLink);
+				if (Directory.Exists(authorizationRoot)) Directory.Delete(authorizationRoot, recursive: true);
+				if (Directory.Exists(authorizationOutside)) Directory.Delete(authorizationOutside, recursive: true);
+			}
+			if (!RequiresLaunchConfirmation("D:\\project\\tool.exe") || RequiresLaunchConfirmation("D:\\project\\manual.pdf"))
+			{
+				throw new InvalidOperationException("executable launch confirmation check failed");
 			}
 			List<FileItem> source = new List<FileItem>
 			{
@@ -399,15 +800,15 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			if (File.Exists(path))
 			{
-				AppConfig existing = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(path), JsonOptions);
-				List<FolderBinding> list = existing?.Folders;
+				AppConfig? existing = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(path), JsonOptions);
+				List<FolderBinding>? list = existing?.Folders;
 				if (list != null && list.Count > 0)
 				{
 					if (UpgradeConfig(existing!, Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)))
 					{
 						File.WriteAllText(path, JsonSerializer.Serialize(existing, JsonOptions), Encoding.UTF8);
 					}
-					return existing;
+					return existing!;
 				}
 			}
 		}
@@ -425,7 +826,6 @@ public partial class MainWindow : Window, IComponentConnector
 		if (config.ConfigVersion < 10)
 		{
 			config.ConfigVersion = 10;
-			config.StartWithWindows = true;
 			upgraded = true;
 		}
 		if (config.ConfigVersion < 11)
@@ -622,6 +1022,7 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		ApplyFileFilter();
 		UpdateSystemStatus();
+		_ = RefreshFolderCountAsync();
 	}
 
 	private void ApplyFileFilter()
@@ -684,15 +1085,222 @@ public partial class MainWindow : Window, IComponentConnector
 		DateTime now = DateTime.Now;
 		ClockText.Text = now.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
 		DateText.Text = now.ToString("yyyy.MM.dd ddd", CultureInfo.InvariantCulture).ToUpperInvariant();
-		int count = _config.Folders.Sum((FolderBinding f) => SafeCount(f.Path));
-		TotalCountText.Text = Math.Min(count, 999).ToString("000", CultureInfo.InvariantCulture);
-		DriveInfo drive = ResolveStorageDrive();
+		DriveInfo? drive = ResolveStorageDrive();
 		StorageText.Text = ((drive == null) ? "--" : $"{drive.RootDirectory.FullName.TrimEnd('\\')} {(double)drive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0:0.0}G");
 		PowerStatus power = SystemInformation.PowerStatus;
 		int pct = Math.Clamp((int)Math.Round(power.BatteryLifePercent * 100f), 0, 100);
 		BatteryText.Text = ((power.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online) ? $"POWER // AC {pct}%" : $"POWER // {pct}%");
-		NetworkText.Text = "NETWORK // LOCAL";
+		TelemetryTimeText.Text = now.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+		TelemetryDateText.Text = now.ToString("yyyy.MM.dd", CultureInfo.InvariantCulture);
+		NetworkText.Text = $"NETWORK // ↓ {FormatDataRate(_networkDownRate)}  ↑ {FormatDataRate(_networkUpRate)}";
 		RecycleText.Text = GetRecycleText();
+	}
+
+	private async Task RefreshTelemetryAsync()
+	{
+		if (_closing || _telemetryRefreshInProgress)
+		{
+			return;
+		}
+		_telemetryRefreshInProgress = true;
+		try
+		{
+			double cpu = ReadCpuUsage();
+			ReadNetworkRates();
+			(double gpu, string gpuDetail) = await ReadGpuUsageAsync();
+			if (_closing)
+			{
+				return;
+			}
+			CpuValueText.Text = cpu < 0 ? "CPU  --%" : $"CPU  {cpu:0}%";
+			CpuUsageBar.Value = Math.Max(0.0, cpu);
+			GpuValueText.Text = gpu < 0 ? "GPU  --%" : $"GPU  {gpu:0}%";
+			GpuUsageBar.Value = Math.Max(0.0, gpu);
+			GpuDetailText.Text = gpuDetail;
+			NetworkRateText.Text = $"NET  {FormatDataRate(_networkDownRate + _networkUpRate)}";
+			NetworkDetailText.Text = $"DOWN {FormatDataRate(_networkDownRate)}  /  UP {FormatDataRate(_networkUpRate)}";
+			TelemetryStatusText.Text = gpu < 0 ? "  //  GPU UTILIZATION UNAVAILABLE" : "  //  ALL LINKS NOMINAL";
+		}
+		finally
+		{
+			_telemetryRefreshInProgress = false;
+		}
+	}
+
+	private double ReadCpuUsage()
+	{
+		if (!GetSystemTimes(out var idleTime, out var kernelTime, out var userTime))
+		{
+			return -1.0;
+		}
+		ulong idle = FileTimeToUInt64(idleTime);
+		ulong kernel = FileTimeToUInt64(kernelTime);
+		ulong user = FileTimeToUInt64(userTime);
+		if (!_cpuSampleReady)
+		{
+			_cpuSampleReady = true;
+			_previousCpuIdle = idle;
+			_previousCpuKernel = kernel;
+			_previousCpuUser = user;
+			return 0.0;
+		}
+		ulong idleDelta = idle - _previousCpuIdle;
+		ulong totalDelta = kernel - _previousCpuKernel + user - _previousCpuUser;
+		_previousCpuIdle = idle;
+		_previousCpuKernel = kernel;
+		_previousCpuUser = user;
+		return totalDelta == 0 ? 0.0 : Math.Clamp((totalDelta - Math.Min(idleDelta, totalDelta)) * 100.0 / totalDelta, 0.0, 100.0);
+	}
+
+	private void ReadNetworkRates()
+	{
+		long received = 0;
+		long sent = 0;
+		foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces().Where(adapter => adapter.OperationalStatus == OperationalStatus.Up && adapter.NetworkInterfaceType != NetworkInterfaceType.Loopback))
+		{
+			try
+			{
+				IPv4InterfaceStatistics statistics = adapter.GetIPv4Statistics();
+				received += statistics.BytesReceived;
+				sent += statistics.BytesSent;
+			}
+			catch
+			{
+			}
+		}
+		DateTime now = DateTime.UtcNow;
+		double elapsed = Math.Max(0.1, (now - _previousNetworkSample).TotalSeconds);
+		if (_previousNetworkReceived > 0 || _previousNetworkSent > 0)
+		{
+			_networkDownRate = Math.Max(0.0, received - _previousNetworkReceived) / elapsed;
+			_networkUpRate = Math.Max(0.0, sent - _previousNetworkSent) / elapsed;
+		}
+		_previousNetworkReceived = received;
+		_previousNetworkSent = sent;
+		_previousNetworkSample = now;
+	}
+
+	private static async Task<(double Usage, string Detail)> ReadGpuUsageAsync()
+	{
+		string systemTool = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "nvidia-smi.exe");
+		string programTool = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe");
+		string executable = File.Exists(systemTool) ? systemTool : File.Exists(programTool) ? programTool : "nvidia-smi";
+		try
+		{
+			ProcessStartInfo startInfo = new ProcessStartInfo
+			{
+				FileName = executable,
+				UseShellExecute = false,
+				CreateNoWindow = true,
+				RedirectStandardOutput = true,
+				RedirectStandardError = true
+			};
+			startInfo.ArgumentList.Add("--query-gpu=utilization.gpu,memory.used,memory.total");
+			startInfo.ArgumentList.Add("--format=csv,noheader,nounits");
+			using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException();
+			using CancellationTokenSource timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2.0));
+			string output = await process.StandardOutput.ReadToEndAsync(timeout.Token);
+			await process.WaitForExitAsync(timeout.Token);
+			string[] values = output.Split(new[] { ',', '\r', '\n' }, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+			if (process.ExitCode == 0 && values.Length >= 3 && double.TryParse(values[0], NumberStyles.Float, CultureInfo.InvariantCulture, out double usage) && double.TryParse(values[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double used) && double.TryParse(values[2], NumberStyles.Float, CultureInfo.InvariantCulture, out double total))
+			{
+				return (Math.Clamp(usage, 0.0, 100.0), $"VRAM {used:0} / {total:0} MB");
+			}
+		}
+		catch
+		{
+		}
+		return (-1.0, $"WPF RENDER TIER {RenderCapability.Tier >> 16} · UTIL N/A");
+	}
+
+	private static string FormatDataRate(double bytesPerSecond)
+	{
+		return bytesPerSecond >= 1024 * 1024 ? $"{bytesPerSecond / 1024 / 1024:0.0}M/s" : bytesPerSecond >= 1024 ? $"{bytesPerSecond / 1024:0.0}K/s" : $"{bytesPerSecond:0}B/s";
+	}
+
+	private void InitializeAudioVisualizer()
+	{
+		LinearGradientBrush fill = new LinearGradientBrush(System.Windows.Media.Color.FromRgb(240, 200, 135), System.Windows.Media.Color.FromRgb(80, 224, 242), 90.0);
+		for (int index = 0; index < 56; index++)
+		{
+			Border bar = new Border
+			{
+				Width = 6.0,
+				Height = 2.0,
+				MinHeight = 2.0,
+				VerticalAlignment = VerticalAlignment.Bottom,
+				HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+				Background = fill,
+				CornerRadius = new CornerRadius(1.0),
+				Opacity = 0.65
+			};
+			_audioBars.Add(bar);
+			AudioVisualizerBars.Children.Add(bar);
+		}
+	}
+
+	private async Task RefreshAudioVisualizerAsync()
+	{
+		if (_closing || _audioSampleInProgress)
+		{
+			return;
+		}
+		_audioSampleInProgress = true;
+		try
+		{
+			double peak = await Task.Run(QQMusicAudio.GetPeak);
+			if (peak < 0.0)
+			{
+				peak = 0.0;
+			}
+			_visualizerPhase += 0.22;
+			for (int index = 0; index < _audioBars.Count; index++)
+			{
+				Border bar = _audioBars[index];
+				double target = ComputeVisualizerBarHeight(peak, index, _audioBars.Count, _visualizerPhase);
+				bar.Height = bar.Height * 0.58 + target * 0.42;
+				bar.Opacity = Math.Clamp(0.45 + peak * 1.5, 0.45, 1.0);
+			}
+		}
+		finally
+		{
+			_audioSampleInProgress = false;
+		}
+	}
+
+	private static double ComputeVisualizerBarHeight(double peak, int index, int count, double phase)
+	{
+		// ponytail: one real output peak drives stylized bands; add WASAPI FFT only when true frequency bins are required.
+		double envelope = 0.35 + 0.65 * Math.Sin(Math.PI * (index + 1) / (count + 1));
+		double motion = 0.55 + 0.45 * Math.Abs(Math.Sin(phase + index * 0.61));
+		return Math.Clamp(2.0 + 5.0 * envelope * motion + Math.Clamp(peak, 0.0, 1.0) * 27.0 * envelope * motion, 2.0, 33.0);
+	}
+
+	private static ulong FileTimeToUInt64(System.Runtime.InteropServices.ComTypes.FILETIME value)
+	{
+		return ((ulong)(uint)value.dwHighDateTime << 32) | (uint)value.dwLowDateTime;
+	}
+
+	private async Task RefreshFolderCountAsync()
+	{
+		if (_closing || _folderCountRefreshInProgress)
+		{
+			return;
+		}
+		_folderCountRefreshInProgress = true;
+		string[] paths = _config.Folders.Select((FolderBinding folder) => folder.Path).ToArray();
+		try
+		{
+			int count = await Task.Run(() => paths.Sum(SafeCount));
+			if (!_closing)
+			{
+				TotalCountText.Text = Math.Min(count, 999).ToString("000", CultureInfo.InvariantCulture);
+			}
+		}
+		finally
+		{
+			_folderCountRefreshInProgress = false;
+		}
 	}
 
 	private static HttpClient CreateWeatherClient()
@@ -874,7 +1482,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void InitializeDriveSelection()
 	{
-		Border storageBorder = FindVisualAncestor<Border>(StorageText);
+		Border? storageBorder = FindVisualAncestor<Border>(StorageText);
 		if (storageBorder == null)
 		{
 			return;
@@ -946,6 +1554,46 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
+	internal static Rect GetCharacterStageClip(System.Windows.Size stageSize)
+	{
+		// The stage is shifted 20 DIP into the former gap. Keep the dialogue's
+		// original right edge protected, but let drifting hair use the reserved
+		// gap on the right. The visible edge remains 8 DIP before the file panel.
+		return new Rect(20.0, 0.0, Math.Max(0.0, stageSize.Width) + 40.0, Math.Max(0.0, stageSize.Height));
+	}
+
+	private void CharacterStage_SizeChanged(object sender, SizeChangedEventArgs e)
+	{
+		CharacterStage.Clip = new RectangleGeometry(GetCharacterStageClip(e.NewSize));
+		if (CharacterImage.Source is BitmapSource source)
+		{
+			Thickness margin = GetCharacterImageMargin(e.NewSize, (double)source.PixelHeight / source.PixelWidth);
+			CharacterImage.Margin = margin;
+			CharacterGhostImage.Margin = margin;
+			if (_characterFadeImage != null) _characterFadeImage.Margin = margin;
+		}
+	}
+
+	internal static Thickness GetCharacterImageMargin(System.Windows.Size stageSize, double heightToWidth)
+	{
+		// Keep the ahoge clear of the header even at the highest bob/ALERT pulse.
+		// Only add headroom where necessary; roomy and narrower screens retain
+		// the existing framing. Uniform scaling remains the responsibility of Image.
+		if (stageSize.Width <= 0.0 || stageSize.Height <= 0.0 || heightToWidth <= 0.0)
+		{
+			return new Thickness(0.0);
+		}
+		double angle = 0.32 * Math.PI / 180.0;
+		double expandedHeight = 1.03 * 1.012 * Math.Cos(angle) + 1.03 * 1.006 * Math.Sin(angle) / heightToWidth;
+		double naturalHeight = stageSize.Width * heightToWidth;
+		double topMargin = Math.Max(0.0, 102.0 + naturalHeight * expandedHeight - stageSize.Height);
+		if (naturalHeight > stageSize.Height - topMargin)
+		{
+			topMargin = (102.0 + (expandedHeight - 1.0) * stageSize.Height) / (expandedHeight + 1.0);
+		}
+		return new Thickness(0.0, Math.Clamp(topMargin, 0.0, stageSize.Height), 0.0, 0.0);
+	}
+
 	private void StartCharacterAnimation()
 	{
 		if (_characterAnimationStarted)
@@ -954,6 +1602,7 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		_characterAnimationStarted = true;
 		CreateNaniteParticles();
+		CreateSignalNoise();
 
 		DoubleAnimation bob = new DoubleAnimation(-78.0, -66.0, new Duration(TimeSpan.FromSeconds(3.8)))
 		{
@@ -1034,6 +1683,10 @@ public partial class MainWindow : Window, IComponentConnector
 			RepeatBehavior = RepeatBehavior.Forever,
 			EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
 		});
+		TelemetrySweepRotate.BeginAnimation(RotateTransform.AngleProperty, new DoubleAnimation(0.0, 360.0, new Duration(TimeSpan.FromSeconds(3.6))) { RepeatBehavior = RepeatBehavior.Forever });
+		HologramBeam.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0.12, 0.3, new Duration(TimeSpan.FromSeconds(2.4))) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever });
+		HologramScanField.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0.1, 0.28, new Duration(TimeSpan.FromMilliseconds(170.0))) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever });
+		SignalNoiseLayer.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0.07, 0.24, new Duration(TimeSpan.FromMilliseconds(115.0))) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever });
 
 		_blinkTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4.8) };
 		_blinkTimer.Tick += delegate
@@ -1106,8 +1759,42 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
+	private void CreateSignalNoise()
+	{
+		if (SignalNoiseLayer.Children.Count > 0)
+		{
+			return;
+		}
+		for (int index = 0; index < 72; index++)
+		{
+			Border noise = new Border
+			{
+				Width = 2.0 + index % 7 * 3.0,
+				Height = index % 5 == 0 ? 2.0 : 1.0,
+				Background = index % 4 == 0 ? System.Windows.Media.Brushes.White : new SolidColorBrush(System.Windows.Media.Color.FromRgb(112, 232, 245)),
+				Opacity = 0.2 + index % 5 * 0.12,
+				IsHitTestVisible = false
+			};
+			SignalNoiseLayer.Children.Add(noise);
+		}
+		ShuffleSignalNoise();
+	}
+
+	private void ShuffleSignalNoise()
+	{
+		double width = Math.Max(CharacterStage.ActualWidth, 480.0);
+		double height = Math.Max(CharacterStage.ActualHeight, 760.0);
+		foreach (FrameworkElement noise in SignalNoiseLayer.Children.OfType<FrameworkElement>())
+		{
+			Canvas.SetLeft(noise, width * (0.08 + Random.Shared.NextDouble() * 0.84));
+			Canvas.SetTop(noise, height * (0.08 + Random.Shared.NextDouble() * 0.82));
+			noise.Opacity = 0.18 + Random.Shared.NextDouble() * 0.68;
+		}
+	}
+
 	private void PlayBlinkPulse()
 	{
+		if (Environment.TickCount64 < _characterCrossfadeUntil) return;
 		DoubleAnimationUsingKeyFrames opacity = new DoubleAnimationUsingKeyFrames
 		{
 			Duration = new Duration(TimeSpan.FromMilliseconds(230.0))
@@ -1125,6 +1812,8 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void PlaySignalGlitch()
 	{
+		if (Environment.TickCount64 < _characterCrossfadeUntil) return;
+		ShuffleSignalNoise();
 		DoubleAnimationUsingKeyFrames jitter = new DoubleAnimationUsingKeyFrames
 		{
 			Duration = new Duration(TimeSpan.FromMilliseconds(245.0))
@@ -1177,16 +1866,42 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async Task InitializeMusicAsync()
 	{
+		if (_closing) return;
 		MusicConnectionText.Text = "正在启动 QQ 音乐链路";
-		if (_config.QQMusicAutoStart)
+		long startupTicket = _config.QQMusicAutoStart ? QQMusicTray.BeginStartup() : 0;
+		bool automaticLaunchSent = false;
+		try
 		{
-			LaunchQQMusic(false, _config.QQMusicPlaylistLink);
-			await Task.Delay(TimeSpan.FromSeconds(4.5));
+			if (_config.QQMusicAutoStart)
+			{
+				automaticLaunchSent = LaunchQQMusic(false, _config.QQMusicPlaylistLink);
+				if (automaticLaunchSent)
+				{
+					await Task.Delay(TimeSpan.FromSeconds(4.5));
+					if (_closing) return;
+					if (!string.IsNullOrWhiteSpace(_config.QQMusicPlaylistLink))
+					{
+						await Task.Run(QQMusicUiBridge.TryPlayCollection);
+						await Task.Delay(500);
+						if (_closing) return;
+					}
+				}
+			}
+			await RefreshMusicStatusAsync();
+			if (_closing) return;
+			if (_config.QQMusicAutoPlay && _musicSessionAvailable && !_musicPlaying)
+			{
+				if (_musicUiFallbackActive) await Task.Run(QQMusicUiBridge.TryPlayPause);
+				else await ExecuteMusicCommandAsync("play");
+			}
 		}
-		await RefreshMusicStatusAsync();
-		if (_config.QQMusicAutoPlay && _musicSessionAvailable && !_musicPlaying)
+		finally
 		{
-			await ExecuteMusicCommandAsync("play");
+			if (automaticLaunchSent)
+			{
+				bool hidden = await Task.Run(() => QQMusicTray.HideAfterStartupAsync(startupTicket));
+				App.LogStartup("QQ Music startup tray hide completed=" + hidden);
+			}
 		}
 	}
 
@@ -1199,24 +1914,69 @@ public partial class MainWindow : Window, IComponentConnector
 		_musicRefreshInProgress = true;
 		try
 		{
+			if (_musicUiFallbackActive)
+			{
+				QQMusicUiStatus uiStatus = await Task.Run(QQMusicUiBridge.ReadStatus);
+				if (uiStatus.Available)
+				{
+					ApplyMusicUiStatus(uiStatus);
+					return;
+				}
+				_musicUiFallbackActive = false;
+			}
 			using JsonDocument? status = await RunMusicBridgeAsync("status");
 			if (status == null || !status.RootElement.TryGetProperty("available", out JsonElement availableElement) || !availableElement.GetBoolean())
 			{
+				QQMusicUiStatus uiStatus = await Task.Run(QQMusicUiBridge.ReadStatus);
+				if (uiStatus.Available)
+				{
+					_musicUiFallbackActive = true;
+					ApplyMusicUiStatus(uiStatus);
+					return;
+				}
 				_musicSessionAvailable = false;
-				MusicConnectionText.Text = Process.GetProcessesByName("QQMusic").Length > 0 ? "QQ 音乐已启动 · 等待播放信号" : "QQ 音乐未启动";
+				_musicSeekable = false;
+				MusicProgressSlider.IsEnabled = false;
+				string bridgeError = status == null ? string.Empty : ReadJsonString(status.RootElement, "error").Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal).Trim();
+				if (bridgeError.Contains("指定的服务未安装", StringComparison.Ordinal) || bridgeError.Contains("service is not installed", StringComparison.OrdinalIgnoreCase)) bridgeError = "Windows 媒体控制服务不可用";
+				MusicConnectionText.Text = string.IsNullOrWhiteSpace(bridgeError) ? (Process.GetProcessesByName("QQMusic").Length > 0 ? "QQ 音乐已启动 · 等待播放信号" : "QQ 音乐未启动") : "媒体链路不可用 · " + bridgeError;
+				MusicProgressSlider.ToolTip = string.IsNullOrWhiteSpace(bridgeError) ? "等待 QQ 音乐媒体会话" : bridgeError;
 				MusicTitleText.Text = "等待 QQ 音乐信号";
 				MusicArtistText.Text = string.IsNullOrWhiteSpace(_config.QQMusicPlaylistName) ? "开机续播 · 上次播放队列" : "开机续播 · " + _config.QQMusicPlaylistName;
 				MusicPlayPauseButton.Content = "▶";
 				return;
 			}
+			_musicUiFallbackActive = false;
 			_musicSessionAvailable = true;
 			JsonElement root = status.RootElement;
 			string title = ReadJsonString(root, "title");
 			string artist = ReadJsonString(root, "artist");
 			string playbackStatus = ReadJsonString(root, "status");
 			_musicPlaying = string.Equals(playbackStatus, "Playing", StringComparison.OrdinalIgnoreCase);
-			_musicPositionSeconds = ReadJsonDouble(root, "position");
+			double reportedPosition = ReadJsonDouble(root, "position");
 			_musicDurationSeconds = Math.Max(0.0, ReadJsonDouble(root, "duration"));
+			_musicSeekable = root.TryGetProperty("seekable", out JsonElement seekableElement) && seekableElement.ValueKind == JsonValueKind.True;
+			if (!_musicSeekable)
+			{
+				QQMusicUiStatus uiStatus = await Task.Run(QQMusicUiBridge.ReadStatus);
+				if (uiStatus.Available)
+				{
+					_musicUiFallbackActive = true;
+					ApplyMusicUiStatus(uiStatus);
+					return;
+				}
+			}
+			if (_pendingSeekSeconds.HasValue && DateTime.UtcNow < _pendingSeekUntil && Math.Abs(reportedPosition - _pendingSeekSeconds.Value) > 2.0)
+			{
+				reportedPosition = _musicPositionSeconds;
+			}
+			else
+			{
+				_pendingSeekSeconds = null;
+			}
+			_musicPositionSeconds = reportedPosition;
+			MusicProgressSlider.IsEnabled = _musicSeekable && _musicDurationSeconds > 0.0;
+			MusicProgressSlider.ToolTip = _musicSeekable ? "拖动或点击跳转播放进度" : "当前 QQ 音乐媒体会话不支持跳转";
 			bool shuffle = root.TryGetProperty("shuffle", out JsonElement shuffleElement) && shuffleElement.ValueKind == JsonValueKind.True;
 			string repeat = ReadJsonString(root, "repeat");
 			_musicModeIndex = shuffle ? 3 : string.Equals(repeat, "Track", StringComparison.OrdinalIgnoreCase) ? 1 : string.Equals(repeat, "List", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
@@ -1243,6 +2003,31 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			_musicRefreshInProgress = false;
 		}
+	}
+
+	private void ApplyMusicUiStatus(QQMusicUiStatus status)
+	{
+		_musicSessionAvailable = true;
+		_musicSeekable = true;
+		_musicPlaying = status.Playing;
+		_musicDurationSeconds = status.Duration;
+		double reportedPosition = status.Position;
+		if (_pendingSeekSeconds.HasValue && DateTime.UtcNow < _pendingSeekUntil && Math.Abs(reportedPosition - _pendingSeekSeconds.Value) > 2.0)
+		{
+			reportedPosition = _musicPositionSeconds;
+		}
+		else
+		{
+			_pendingSeekSeconds = null;
+		}
+		_musicPositionSeconds = reportedPosition;
+		MusicProgressSlider.IsEnabled = status.Duration > 0.0;
+		MusicProgressSlider.ToolTip = "拖动或点击跳转播放进度 · QQ MUSIC UI LINK";
+		MusicTitleText.Text = string.IsNullOrWhiteSpace(status.Title) || status.Title == "QQ音乐" ? "QQ 音乐播放队列" : status.Title;
+		MusicArtistText.Text = string.IsNullOrWhiteSpace(_config.QQMusicPlaylistName) ? "本地播放器控制" : _config.QQMusicPlaylistName;
+		MusicConnectionText.Text = status.Playing ? "QQ MUSIC UI LINK · PLAYING" : "QQ MUSIC UI LINK · PAUSED";
+		MusicPlayPauseButton.Content = status.Playing ? "Ⅱ" : "▶";
+		UpdateMusicProgressUi();
 	}
 
 	private static string ReadJsonString(JsonElement element, string name)
@@ -1338,27 +2123,40 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
-	private async Task ExecuteMusicCommandAsync(string command, string? value = null)
+	private async Task<bool> ExecuteMusicCommandAsync(string command, string? value = null, bool refresh = true)
 	{
 		MusicConnectionText.Text = "正在向 QQ 音乐发送控制指令";
 		using JsonDocument? result = await RunMusicBridgeAsync(command, value);
 		if (result == null)
 		{
 			MusicConnectionText.Text = "控制指令未被 QQ 音乐接收";
-			return;
+			return false;
 		}
-		await Task.Delay(260);
-		await RefreshMusicStatusAsync();
+		bool ok = !result.RootElement.TryGetProperty("ok", out JsonElement okElement) || okElement.ValueKind == JsonValueKind.True;
+		if (!ok)
+		{
+			string error = ReadJsonString(result.RootElement, "error");
+			MusicConnectionText.Text = string.IsNullOrWhiteSpace(error) ? "QQ 音乐拒绝了控制指令" : error;
+			return false;
+		}
+		if (refresh)
+		{
+			await Task.Delay(260);
+			await RefreshMusicStatusAsync();
+		}
+		return true;
 	}
 
 	private void MusicPreviousButton_Click(object sender, RoutedEventArgs e)
 	{
-		_ = ExecuteMusicCommandAsync("previous");
+		if (_musicUiFallbackActive) _ = Task.Run(QQMusicUiBridge.TryPrevious);
+		else _ = ExecuteMusicCommandAsync("previous");
 	}
 
 	private void MusicNextButton_Click(object sender, RoutedEventArgs e)
 	{
-		_ = ExecuteMusicCommandAsync("next");
+		if (_musicUiFallbackActive) _ = Task.Run(QQMusicUiBridge.TryNext);
+		else _ = ExecuteMusicCommandAsync("next");
 	}
 
 	private void MusicPlayPauseButton_Click(object sender, RoutedEventArgs e)
@@ -1367,12 +2165,18 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			LaunchQQMusic(true);
 		}
-		_ = ExecuteMusicCommandAsync("playpause");
+		if (_musicUiFallbackActive) _ = Task.Run(QQMusicUiBridge.TryPlayPause);
+		else _ = ExecuteMusicCommandAsync("playpause");
 	}
 
 	private void MusicProgressSlider_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
 	{
 		_musicSeeking = true;
+		if (FindVisualAncestor<System.Windows.Controls.Primitives.Thumb>(e.OriginalSource as DependencyObject) == null && MusicProgressSlider.ActualWidth > 0.0)
+		{
+			double ratio = Math.Clamp(e.GetPosition(MusicProgressSlider).X / MusicProgressSlider.ActualWidth, 0.0, 1.0);
+			MusicProgressSlider.Value = MusicProgressSlider.Minimum + ratio * (MusicProgressSlider.Maximum - MusicProgressSlider.Minimum);
+		}
 	}
 
 	private async void MusicProgressSlider_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -1381,10 +2185,33 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			return;
 		}
+		double requestedPosition = Math.Clamp(MusicProgressSlider.Value, 0.0, _musicDurationSeconds);
 		_musicSeeking = false;
-		_musicPositionSeconds = MusicProgressSlider.Value;
+		_musicPositionSeconds = requestedPosition;
+		_pendingSeekSeconds = requestedPosition;
+		_pendingSeekUntil = DateTime.UtcNow.AddSeconds(3.0);
 		UpdateMusicProgressUi();
-		await ExecuteMusicCommandAsync("seek", _musicPositionSeconds.ToString("0.###", CultureInfo.InvariantCulture));
+		bool ok = _musicUiFallbackActive
+			? await Task.Run(() => QQMusicUiBridge.TrySeek(requestedPosition, _musicDurationSeconds))
+			: await ExecuteMusicCommandAsync("seek", requestedPosition.ToString("0.###", CultureInfo.InvariantCulture), refresh: false);
+		if (!ok && !_musicUiFallbackActive)
+		{
+			ok = await Task.Run(() => QQMusicUiBridge.TrySeek(requestedPosition, _musicDurationSeconds));
+			_musicUiFallbackActive = ok;
+		}
+		if (!ok)
+		{
+			_pendingSeekSeconds = null;
+			await RefreshMusicStatusAsync();
+			return;
+		}
+		await Task.Delay(900);
+		_pendingSeekSeconds = null;
+		await RefreshMusicStatusAsync();
+		if (Math.Abs(_musicPositionSeconds - requestedPosition) > 3.0)
+		{
+			MusicConnectionText.Text = "QQ 音乐未确认新的播放位置";
+		}
 	}
 
 	private void MusicProgressSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -1415,18 +2242,18 @@ public partial class MainWindow : Window, IComponentConnector
 	private void BindMusicPlaylistButton_Click(object sender, RoutedEventArgs e)
 	{
 		System.Windows.Controls.TextBox holder = new System.Windows.Controls.TextBox { Text = _config.QQMusicPlaylistLink ?? string.Empty };
-		ShowTextEntryDialog(holder, "粘贴 QQ 音乐歌单分享链接（留空则续播上次队列）");
+		ShowTextEntryDialog(holder, "粘贴 QQ 音乐专辑或歌单分享链接（留空则续播上次队列）");
 		string link = holder.Text.Trim();
-		if (!string.IsNullOrEmpty(link) && (!Uri.TryCreate(link, UriKind.Absolute, out Uri? uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)))
+		if (!string.IsNullOrEmpty(link) && (!Uri.TryCreate(link, UriKind.Absolute, out Uri? uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) || !(uri.Host.Equals("y.qq.com", StringComparison.OrdinalIgnoreCase) || uri.Host.EndsWith(".y.qq.com", StringComparison.OrdinalIgnoreCase))))
 		{
-			MusicConnectionText.Text = "歌单链接格式不正确";
+			MusicConnectionText.Text = "请输入 QQ 音乐官方专辑或歌单链接";
 			return;
 		}
 		_config.QQMusicPlaylistLink = link;
-		_config.QQMusicPlaylistName = string.IsNullOrEmpty(link) ? "上次播放队列" : "已绑定歌单";
+		_config.QQMusicPlaylistName = string.IsNullOrEmpty(link) ? "上次播放队列" : "已绑定专辑 / 歌单";
 		SaveConfig();
 		MusicArtistText.Text = "开机续播 · " + _config.QQMusicPlaylistName;
-		MusicConnectionText.Text = string.IsNullOrEmpty(link) ? "已设为续播上次队列" : "歌单已绑定 · 请在 QQ 音乐中播放一次";
+		MusicConnectionText.Text = string.IsNullOrEmpty(link) ? "已设为续播上次队列" : "启动专辑 / 歌单已绑定";
 		if (!string.IsNullOrEmpty(link))
 		{
 			LaunchQQMusic(true, link);
@@ -1440,6 +2267,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private bool LaunchQQMusic(bool showWindow, string? target = null)
 	{
+		if (showWindow) QQMusicTray.CancelPendingHide();
 		try
 		{
 			Process[] running = Process.GetProcessesByName("QQMusic");
@@ -1451,6 +2279,7 @@ public partial class MainWindow : Window, IComponentConnector
 			if (!string.IsNullOrWhiteSpace(executable))
 			{
 				ProcessStartInfo startInfo = new ProcessStartInfo { FileName = executable, UseShellExecute = true };
+				if (!showWindow && string.IsNullOrWhiteSpace(target)) startInfo.ArgumentList.Add("/background");
 				if (!string.IsNullOrWhiteSpace(target))
 				{
 					startInfo.ArgumentList.Add(target);
@@ -1494,12 +2323,50 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 			}
 		}
+		string? installed = FindRegisteredQQMusic();
+		if (installed != null)
+		{
+			return installed;
+		}
 		string[] candidates =
 		{
 			Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Tencent", "QQMusic", "QQMusic.exe"),
 			Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tencent", "QQMusic", "QQMusic.exe")
 		};
 		return candidates.FirstOrDefault(File.Exists);
+	}
+
+	private static string? FindRegisteredQQMusic()
+	{
+		(RegistryHive Hive, RegistryView View)[] locations =
+		{
+			(RegistryHive.CurrentUser, RegistryView.Default),
+			(RegistryHive.LocalMachine, RegistryView.Registry64),
+			(RegistryHive.LocalMachine, RegistryView.Registry32)
+		};
+		foreach ((RegistryHive hive, RegistryView view) in locations)
+		{
+			try
+			{
+				using RegistryKey baseKey = RegistryKey.OpenBaseKey(hive, view);
+				using RegistryKey? uninstall = baseKey.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall");
+				if (uninstall == null) continue;
+				foreach (string subkeyName in uninstall.GetSubKeyNames())
+				{
+					using RegistryKey? product = uninstall.OpenSubKey(subkeyName);
+					if (product == null || !string.Equals(product.GetValue("DisplayName") as string, "QQ音乐", StringComparison.OrdinalIgnoreCase)) continue;
+					string? installLocation = product.GetValue("InstallLocation") as string;
+					string? executable = string.IsNullOrWhiteSpace(installLocation) ? null : Path.Combine(installLocation, "QQMusic.exe");
+					if (executable != null && File.Exists(executable)) return executable;
+					string? displayIcon = (product.GetValue("DisplayIcon") as string)?.Trim('"').Split(',')[0];
+					if (displayIcon != null && File.Exists(displayIcon)) return displayIcon;
+				}
+			}
+			catch
+			{
+			}
+		}
+		return null;
 	}
 
 	private void ConfigureButton_Click(object sender, RoutedEventArgs e)
@@ -1601,7 +2468,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void AddMoveSelectionButton()
 	{
-		Grid toolbar = FindVisualAncestor(SearchBox, (Grid grid) => grid.ColumnDefinitions.Count == 2 && FindVisualDescendants(grid).OfType<System.Windows.Controls.Button>().Any((System.Windows.Controls.Button button) => string.Equals(button.Content?.ToString(), "↻ SCAN", StringComparison.Ordinal)));
+		Grid? toolbar = FindVisualAncestor(SearchBox, (Grid grid) => grid.ColumnDefinitions.Count == 2 && FindVisualDescendants(grid).OfType<System.Windows.Controls.Button>().Any((System.Windows.Controls.Button button) => string.Equals(button.Content?.ToString(), "↻ SCAN", StringComparison.Ordinal)));
 		if (toolbar == null)
 		{
 			return;
@@ -1702,11 +2569,11 @@ public partial class MainWindow : Window, IComponentConnector
 					}
 					if (item.IsDirectory)
 					{
-						Directory.Move(item.FullPath, targetPath);
+						Microsoft.VisualBasic.FileIO.FileSystem.MoveDirectory(item.FullPath, targetPath, overwrite: false);
 					}
 					else
 					{
-						File.Move(item.FullPath, targetPath);
+						Microsoft.VisualBasic.FileIO.FileSystem.MoveFile(item.FullPath, targetPath, overwrite: false);
 					}
 					moved++;
 				}
@@ -1753,7 +2620,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private async void SubmitChat()
 	{
-		Process codexProcess = _codexProcess;
+		Process? codexProcess = _codexProcess;
 		if (codexProcess != null && !codexProcess.HasExited)
 		{
 			CancelCodex();
@@ -1818,17 +2685,7 @@ public partial class MainWindow : Window, IComponentConnector
 			StandardErrorEncoding = Encoding.UTF8
 		};
 		psi.ArgumentList.Add("exec");
-		// Keep Codex constrained to the terminal workspace, but grant write access to
-		// every folder the commander explicitly bound in the UI. These options must
-		// be placed before the `resume` subcommand; otherwise resumed sessions lose
-		// the additional writable roots and ordinary file operations are denied.
-		psi.ArgumentList.Add("--sandbox");
-		psi.ArgumentList.Add("workspace-write");
-		foreach (string path in GetBoundDirectories())
-		{
-			psi.ArgumentList.Add("--add-dir");
-			psi.ArgumentList.Add(path);
-		}
+		// No sandbox or approval flags: Codex inherits the user's own configuration.
 		if (_codexSessionId != null)
 		{
 			psi.ArgumentList.Add("resume");
@@ -1865,7 +2722,7 @@ public partial class MainWindow : Window, IComponentConnector
 		using StreamReader reader = process.StandardOutput;
 		while (true)
 		{
-			string line = await reader.ReadLineAsync(cancellationToken);
+			string? line = await reader.ReadLineAsync(cancellationToken);
 			if (line == null)
 			{
 				break;
@@ -1905,7 +2762,7 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			using JsonDocument doc = JsonDocument.Parse(line);
 			JsonElement root = doc.RootElement;
-			string type = (root.TryGetProperty("type", out var t) ? t.GetString() : null);
+			string? type = (root.TryGetProperty("type", out var t) ? t.GetString() : null);
 			JsonElement item;
 			if (type == "thread.started" && root.TryGetProperty("thread_id", out var id))
 			{
@@ -1915,7 +2772,7 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 			else if (type == "item.completed" && root.TryGetProperty("item", out item))
 			{
-				string itemType = (item.TryGetProperty("type", out var it) ? it.GetString() : null);
+				string? itemType = (item.TryGetProperty("type", out var it) ? it.GetString() : null);
 				JsonElement text;
 				if (itemType == "command_execution")
 				{
@@ -1928,7 +2785,7 @@ public partial class MainWindow : Window, IComponentConnector
 			}
 			else if ((type == "turn.failed" || type == "error") ? true : false)
 			{
-				string message = (root.TryGetProperty("message", out var m) ? m.GetString() : "Codex 执行失败");
+				string message = (root.TryGetProperty("message", out var m) ? m.GetString() : null) ?? "Codex 执行失败";
 				CodexStatusText.Text = "CODEX RETRYING";
 				FooterStatusText.Text = "LOG // " + message;
 			}
@@ -1940,7 +2797,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void HandleAgentMessage(string text)
 	{
-		AssistantEnvelope envelope = null;
+		AssistantEnvelope? envelope = null;
 		try
 		{
 			envelope = JsonSerializer.Deserialize<AssistantEnvelope>(text, JsonOptions);
@@ -1948,7 +2805,7 @@ public partial class MainWindow : Window, IComponentConnector
 		catch
 		{
 		}
-		if ((object)envelope == null || string.IsNullOrWhiteSpace(envelope.Reply))
+		if (envelope == null || string.IsNullOrWhiteSpace(envelope.Reply))
 		{
 			envelope = new AssistantEnvelope(text, "idle", "READY");
 		}
@@ -2045,6 +2902,10 @@ public partial class MainWindow : Window, IComponentConnector
 		{
 			displayName = target;
 		}
+		if (RequiresLaunchConfirmation(target) && System.Windows.MessageBox.Show($"灰风请求启动可能执行代码的条目：\n\n{target}\n\n是否继续？", "确认启动", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+		{
+			return $"系统已取消启动：{displayName}";
+		}
 		string? workingDirectory = Directory.Exists(target) ? target : Path.GetDirectoryName(target);
 		long shellResult = ShellExecute(_windowHandle, "open", target, null, workingDirectory, 1).ToInt64();
 		if (shellResult <= 32)
@@ -2053,6 +2914,11 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		FooterStatusText.Text = $"LOG // OPEN REQUEST SENT · {displayName}";
 		return $"系统已实际调用 Windows 打开入口：{displayName}";
+	}
+
+	private static bool RequiresLaunchConfirmation(string target)
+	{
+		return !Directory.Exists(target) && ExecutableExtensions.Contains(Path.GetExtension(target));
 	}
 
 	private static void PrepareNewFileTarget(string target, IEnumerable<string> roots)
@@ -2153,21 +3019,121 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void LoadCharacterMood(string mood)
 	{
-		if (!(_characterMood == mood))
+		_characterMood = mood;
+		_characterExpressionState.SetAmbientMood(mood);
+		ApplyCharacterExpression();
+	}
+
+	private void InitializeCharacterCrossfade()
+	{
+		if (CharacterImage.RenderTransform is TransformGroup group && !group.IsFrozen)
 		{
-			string filename = ((mood == "idle") ? "character-neutral.png" : ("character-" + mood + ".png"));
-			ImageSource? moodImage = LoadImageAsset(filename) ?? LoadImageAsset("character.png");
-			if (moodImage != null)
-			{
-				CharacterImage.Source = moodImage;
-				CharacterGhostImage.Source = moodImage;
-				CharacterImage.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0.68, 1.0, new Duration(TimeSpan.FromMilliseconds(210.0)))
-				{
-					EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
-				});
-			}
-			_characterMood = mood;
+			group.Children.Add(_characterSwapLift);
 		}
+		if (CharacterImage.Parent is not System.Windows.Controls.Panel host) return;
+		_characterFadeImage = new System.Windows.Controls.Image
+		{
+			Stretch = System.Windows.Media.Stretch.Uniform,
+			HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+			VerticalAlignment = System.Windows.VerticalAlignment.Center,
+			IsHitTestVisible = false,
+			Opacity = 0.0,
+			RenderTransformOrigin = new System.Windows.Point(0.5, 0.5),
+			RenderTransform = CharacterImage.RenderTransform,
+			Margin = CharacterImage.Margin
+		};
+		RenderOptions.SetBitmapScalingMode(_characterFadeImage, BitmapScalingMode.HighQuality);
+		host.Children.Insert(host.Children.IndexOf(CharacterImage) + 1, _characterFadeImage);
+	}
+
+	private void ApplyCharacterExpression(bool returning = false)
+	{
+		CharacterLook look = _characterExpressionState.Current;
+		BitmapSource source = _characterExpressions.Load(look);
+		_characterLookGeometry = CharacterExpressionAssets.Geometry(look);
+		if (ReferenceEquals(CharacterImage.Source, source) && ReferenceEquals(CharacterGhostImage.Source, source)) return;
+		// Same 1024x1536 canvas, DPI and ground line for every sprite: layout, breathing and
+		// signal-effect transforms stay as they are; only the silhouette and hit geometry change.
+		ImageSource? previous = CharacterImage.Source;
+		bool poseChange = look.Normalized.Pose != _shownLook.Pose;
+		_shownLook = look.Normalized;
+		CharacterImage.Source = source;
+		CharacterGhostImage.Source = source;
+		if (previous == null || _characterFadeImage == null || !IsLoaded || _closing) return;
+		double fadeMs = (poseChange ? PoseFadeTime : ExpressionFadeTime).TotalMilliseconds * (returning ? 1.35 : 1.0);
+		PlayCharacterCrossfade(previous, TimeSpan.FromMilliseconds(fadeMs), poseChange ? (returning ? -4.0 : -7.0) : 0.0);
+	}
+
+	private void PlayCharacterCrossfade(ImageSource previous, TimeSpan fade, double lift)
+	{
+		System.Windows.Controls.Image layer = _characterFadeImage!;
+		// Blink and glitch also animate CharacterImage opacity; keep them out of the transition.
+		_characterCrossfadeUntil = Environment.TickCount64 + (long)fade.TotalMilliseconds + 60;
+		layer.Margin = CharacterImage.Margin;
+		layer.Source = previous;
+		// The outgoing sprite stays solid on top while the new one fades in beneath it, then
+		// dissolves. Limbs that appear and limbs that disappear both blend instead of popping,
+		// and the figure never turns see-through mid-way.
+		DoubleAnimationUsingKeyFrames outgoing = new DoubleAnimationUsingKeyFrames
+		{
+			Duration = new Duration(fade)
+		};
+		outgoing.KeyFrames.Add(new DiscreteDoubleKeyFrame(1.0, KeyTime.FromPercent(0.0)));
+		outgoing.KeyFrames.Add(new LinearDoubleKeyFrame(1.0, KeyTime.FromPercent(0.35)));
+		outgoing.KeyFrames.Add(new EasingDoubleKeyFrame(0.0, KeyTime.FromPercent(1.0), new SineEase { EasingMode = EasingMode.EaseInOut }));
+		outgoing.Completed += delegate
+		{
+			if (ReferenceEquals(layer.Source, previous)) layer.Source = null;
+		};
+		layer.BeginAnimation(UIElement.OpacityProperty, outgoing);
+		DoubleAnimation incoming = new DoubleAnimation(0.0, 1.0, new Duration(TimeSpan.FromMilliseconds(fade.TotalMilliseconds * 0.6)))
+		{
+			EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+		};
+		CharacterImage.BeginAnimation(UIElement.OpacityProperty, incoming);
+		if (lift == 0.0) return;
+		// A small lift-and-settle so a pose change reads as her moving, not a slide swap.
+		DoubleAnimationUsingKeyFrames settle = new DoubleAnimationUsingKeyFrames
+		{
+			Duration = new Duration(TimeSpan.FromMilliseconds(fade.TotalMilliseconds * 1.15))
+		};
+		settle.KeyFrames.Add(new EasingDoubleKeyFrame(lift, KeyTime.FromPercent(0.35), new SineEase { EasingMode = EasingMode.EaseOut }));
+		settle.KeyFrames.Add(new EasingDoubleKeyFrame(0.0, KeyTime.FromPercent(1.0), new SineEase { EasingMode = EasingMode.EaseInOut }));
+		_characterSwapLift.BeginAnimation(TranslateTransform.YProperty, settle);
+	}
+
+	private void CharacterVoiceStarted(CharacterVoiceLine line)
+	{
+		if (_closing) return;
+		_characterLingerTimer?.Stop();
+		_characterExpressionState.BeginTouch(line.Look);
+		ApplyCharacterExpression();
+		AssistantMessage.Text = line.English + "\n" + line.Chinese;
+	}
+
+	private void CharacterVoiceStopped()
+	{
+		if (_closing)
+		{
+			_characterLingerTimer?.Stop();
+			return;
+		}
+		if (_characterExpressionState.Touch is not CharacterLook touch) return;
+		// Hold the reaction for a moment after the line ends, then ease back to the ambient look.
+		if (_characterLingerTimer == null)
+		{
+			_characterLingerTimer = new DispatcherTimer(DispatcherPriority.Normal);
+			_characterLingerTimer.Tick += CharacterLingerTick;
+		}
+		_characterLingerTimer.Stop();
+		_characterLingerTimer.Interval = touch.IsPose ? PoseLingerTime : ExpressionLingerTime;
+		_characterLingerTimer.Start();
+	}
+
+	private void CharacterLingerTick(object? sender, EventArgs e)
+	{
+		_characterLingerTimer?.Stop();
+		if (!_closing && _characterExpressionState.EndTouch()) ApplyCharacterExpression(returning: true);
 	}
 
 	private ImageSource? LoadImageAsset(string filename)
@@ -2205,7 +3171,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void RemoveUnneededHud()
 	{
-		Grid activeGrid = FindVisualAncestor(ActiveFolderText, (Grid g) => g.RowDefinitions.Count == 4);
+		Grid? activeGrid = FindVisualAncestor(ActiveFolderText, (Grid g) => g.RowDefinitions.Count == 4);
 		if (activeGrid != null)
 		{
 			activeGrid.RowDefinitions[0].Height = new GridLength(0.0);
@@ -2253,72 +3219,6 @@ public partial class MainWindow : Window, IComponentConnector
 		PersistChatHistory();
 	}
 
-	private void ArrangeCommandInput()
-	{
-		Grid stage = FindVisualAncestor(ChatInput, (Grid grid) => grid.RowDefinitions.Count == 2 && grid.ColumnDefinitions.Count == 0);
-		Border explanation = FindVisualAncestor<Border>(AssistantMessage);
-		Border inputBorder = FindVisualAncestor<Border>(ChatInput);
-		if (stage == null || explanation == null || inputBorder == null)
-		{
-			return;
-		}
-		stage.RowDefinitions.Add(new RowDefinition
-		{
-			Height = GridLength.Auto
-		});
-		Grid.SetRow(explanation, 1);
-		Grid.SetRow(inputBorder, 2);
-		inputBorder.Margin = new Thickness(6.0, 8.0, 6.0, 0.0);
-		inputBorder.VerticalAlignment = VerticalAlignment.Top;
-		if (VisualTreeHelper.GetParent(ChatInput) is Grid inputGrid)
-		{
-			System.Windows.Controls.Button send = FindVisualDescendants(inputBorder).OfType<System.Windows.Controls.Button>().FirstOrDefault((System.Windows.Controls.Button button) => string.Equals(button.Content?.ToString(), "SEND  ↵", StringComparison.Ordinal));
-			if (send != null)
-			{
-				inputGrid.Children.Remove(send);
-			}
-			inputGrid.ColumnDefinitions.Clear();
-			inputGrid.ColumnDefinitions.Add(new ColumnDefinition
-			{
-				Width = GridLength.Auto
-			});
-			inputGrid.ColumnDefinitions.Add(new ColumnDefinition
-			{
-				Width = new GridLength(1.0, GridUnitType.Star)
-			});
-			inputGrid.ColumnDefinitions.Add(new ColumnDefinition
-			{
-				Width = GridLength.Auto
-			});
-			TextBlock prompt = new TextBlock
-			{
-				Text = ">_",
-				FontFamily = new System.Windows.Media.FontFamily("Consolas"),
-				FontSize = 12.0,
-				Foreground = (FindResource("Cyan") as System.Windows.Media.Brush),
-				VerticalAlignment = VerticalAlignment.Center,
-				Margin = new Thickness(4.0, 0.0, 8.0, 0.0)
-			};
-			Grid.SetColumn(prompt, 0);
-			Grid.SetColumn(ChatInput, 1);
-			ChatInput.ToolTip = "输入指令，按 Enter 发送";
-			inputGrid.Children.Insert(0, prompt);
-			System.Windows.Controls.Button imeInput = new System.Windows.Controls.Button
-			{
-				Style = (FindResource("TerminalButton") as Style),
-				Content = "中 INPUT",
-				Margin = new Thickness(8.0, 0.0, 0.0, 0.0),
-				Padding = new Thickness(10.0, 6.0, 10.0, 6.0)
-			};
-			Grid.SetColumn(imeInput, 2);
-			imeInput.Click += delegate
-			{
-				ShowTextEntryDialog(ChatInput, "灰风指令输入");
-			};
-			inputGrid.Children.Add(imeInput);
-		}
-	}
-
 	private void LoadChatHistory()
 	{
 		try
@@ -2355,10 +3255,10 @@ public partial class MainWindow : Window, IComponentConnector
 		_codexCancellation?.Cancel();
 		try
 		{
-			Process codexProcess = _codexProcess;
+			Process? codexProcess = _codexProcess;
 			if (codexProcess != null && !codexProcess.HasExited)
 			{
-				_codexProcess.Kill(entireProcessTree: true);
+				codexProcess.Kill(entireProcessTree: true);
 			}
 		}
 		catch
@@ -2371,7 +3271,7 @@ public partial class MainWindow : Window, IComponentConnector
 		string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OpenAI", "Codex", "bin");
 		try
 		{
-			string found = (Directory.Exists(root) ? Directory.EnumerateFiles(root, "codex.exe", SearchOption.AllDirectories).OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault() : null);
+			string? found = (Directory.Exists(root) ? Directory.EnumerateFiles(root, "codex.exe", SearchOption.AllDirectories).OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault() : null);
 			if (found != null)
 			{
 				return found;
@@ -2385,7 +3285,7 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private static string FindProjectDirectory(string runtimeDirectory)
 	{
-		DirectoryInfo directory = new DirectoryInfo(runtimeDirectory);
+		DirectoryInfo? directory = new DirectoryInfo(runtimeDirectory);
 		int i = 0;
 		while (i < 6 && directory != null)
 		{
@@ -2629,11 +3529,7 @@ public partial class MainWindow : Window, IComponentConnector
 			{
 			}
 		}
-		Activate();
-		if (_windowHandle != IntPtr.Zero)
-		{
-			SetWindowPos(_windowHandle, IntPtr.Zero, 0, 0, 0, 0, 67u);
-		}
+		AnchorDesktopLayer();
 	}
 
 	private void TextInput_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
@@ -2750,18 +3646,13 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 		else if (e.Key == Key.Escape)
 		{
-			Process codexProcess = _codexProcess;
+			Process? codexProcess = _codexProcess;
 			if (codexProcess != null && !codexProcess.HasExited)
 			{
 				e.Handled = true;
 				CancelCodex();
 			}
 		}
-	}
-
-	private void SendButton_Click(object sender, RoutedEventArgs e)
-	{
-		SubmitChat();
 	}
 
 	private void ChatImeButton_Click(object sender, RoutedEventArgs e)
@@ -2771,7 +3662,12 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
 	{
-		if (e.Key == Key.F10)
+		if (e.Key == Key.Escape && _startupOverlay?.IsPlaying == true)
+		{
+			e.Handled = true;
+			_startupOverlay.Skip();
+		}
+		else if (e.Key == Key.F10)
 		{
 			e.Handled = true;
 			ToggleOverlay();
@@ -2787,8 +3683,27 @@ public partial class MainWindow : Window, IComponentConnector
 		}
 	}
 
+	private void CharacterImage_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+	{
+		if (_closing || !IsVisible || _startupOverlay != null || !_startupInitialized
+			|| CharacterImage.Source is not BitmapSource source) return;
+		if (!ReferenceEquals(source, _characterHitSource))
+		{
+			_characterHitMap = new CharacterHitMap(source, _characterLookGeometry);
+			_characterHitSource = source;
+		}
+		// WPF converts through breathing, drifting, rotation and stage offset for us.
+		CharacterTouchRegion region = _characterHitMap!.RegionAtImagePoint(e.GetPosition(CharacterImage),
+			new System.Windows.Size(CharacterImage.ActualWidth, CharacterImage.ActualHeight));
+		if (region == CharacterTouchRegion.None) return;
+		e.Handled = true;
+		_characterVoice?.TryPlay(region);
+	}
+
 	private void HideOverlay()
 	{
+		_characterVoice?.Stop();
+		_startupOverlay?.Skip();
 		Hide();
 	}
 
@@ -2796,19 +3711,31 @@ public partial class MainWindow : Window, IComponentConnector
 	{
 		if (base.IsVisible)
 		{
-			Hide();
+			HideOverlay();
 			return;
 		}
-		Show();
-		base.WindowState = WindowState.Maximized;
-		AnchorDesktopLayer();
+		ShowOverlay(activate: true);
 	}
 
 	private void ShowFromTray()
 	{
+		ShowOverlay(activate: true);
+	}
+
+	internal void ShowOverlay(bool activate)
+	{
+		FitDesktopBounds();
 		Show();
-		base.WindowState = WindowState.Maximized;
-		AnchorDesktopLayer();
+		WindowState = WindowState.Normal;
+		if (_windowHandle != IntPtr.Zero)
+		{
+			SetWindowPos(_windowHandle, IntPtr.Zero, 0, 0, 0, 0, 83u);
+			if (activate)
+			{
+				Activate();
+				SetForegroundWindow(_windowHandle);
+			}
+		}
 	}
 
 	private void InitializeTrayIcon()
@@ -2845,10 +3772,8 @@ public partial class MainWindow : Window, IComponentConnector
 		_windowHandle = new WindowInteropHelper(this).Handle;
 		_source = HwndSource.FromHwnd(_windowHandle);
 		_source?.AddHook(HwndHook);
-		RegisterHotKey(_windowHandle, 18960, 16384u, 121u);
-		_winEventDelegate = OnWinEvent;
-		_foregroundHook = SetWinEventHook(3u, 3u, IntPtr.Zero, _winEventDelegate, 0u, 0u, 2u);
-		AnchorDesktopLayer();
+		bool hotkeyRegistered = RegisterHotKey(_windowHandle, 18960, 16384u, 121u);
+		App.LogStartup($"F10 registration={hotkeyRegistered}; error={(hotkeyRegistered ? 0 : Marshal.GetLastWin32Error())}");
 	}
 
 	private nint HwndHook(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
@@ -2868,19 +3793,8 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private void AnchorDesktopLayer()
 	{
-		bool textInputActive = _textEntryDialogOpen || ChatInput?.IsKeyboardFocusWithin == true || SearchBox?.IsKeyboardFocusWithin == true;
-		if (_windowHandle != IntPtr.Zero && base.IsVisible && !textInputActive)
-		{
-			nint desktopAnchor = FindWindow("Progman", "Program Manager");
-			if (desktopAnchor == IntPtr.Zero)
-			{
-				desktopAnchor = FindWindow("WorkerW", null);
-			}
-			if (desktopAnchor != IntPtr.Zero)
-			{
-				SetWindowPos(_windowHandle, desktopAnchor, 0, 0, 0, 0, 83u);
-			}
-		}
+		// Keep the command interface as a normal top-level window. Inserting it
+		// behind Progman places it below the wallpaper on some Windows 11 builds.
 	}
 
 	private void ScheduleDesktopLayerSync()
@@ -2903,22 +3817,27 @@ public partial class MainWindow : Window, IComponentConnector
 	{
 		if (_windowHandle != IntPtr.Zero)
 		{
-			if (previousForeground != IntPtr.Zero && previousForeground != _windowHandle)
-			{
-				SetForegroundWindow(previousForeground);
-			}
-			AnchorDesktopLayer();
+			SetWindowPos(_windowHandle, IntPtr.Zero, 0, 0, 0, 0, 83u);
 		}
 	}
 
 	private void DisposeResources()
 	{
 		_closing = true;
+		SystemEvents.SessionSwitch -= OnSessionSwitch;
+		_characterVoice?.Dispose();
+		_characterVoice = null;
+		_startupOverlay?.Dispose();
 		CancelCodex();
 		DisposeWatcher();
 		_clockTimer?.Stop();
 		_weatherTimer?.Stop();
 		_blinkTimer?.Stop();
+		_glitchTimer?.Stop();
+		_musicTimer?.Stop();
+		_musicVolumeTimer?.Stop();
+		_audioVisualizerTimer?.Stop();
+		_telemetryTimer?.Stop();
 		_weatherClient.Dispose();
 		if (_windowHandle != IntPtr.Zero)
 		{
@@ -2938,14 +3857,83 @@ public partial class MainWindow : Window, IComponentConnector
 
 	private static bool IsAllowedPath(string candidate, IEnumerable<string> roots)
 	{
-		return roots.Any((string root) => string.Equals(Path.GetFullPath(candidate).TrimEnd(Path.DirectorySeparatorChar), Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase) || Path.GetFullPath(candidate).StartsWith(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+		try
+		{
+			string candidatePath = Path.GetFullPath(candidate).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+			foreach (string root in roots)
+			{
+				string rootPath = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+				if (!string.Equals(candidatePath, rootPath, StringComparison.OrdinalIgnoreCase) && !candidatePath.StartsWith(rootPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+				{
+					continue;
+				}
+				string current = rootPath;
+				foreach (string part in Path.GetRelativePath(rootPath, candidatePath).Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries))
+				{
+					if (part == ".")
+					{
+						continue;
+					}
+					current = Path.Combine(current, part);
+					if (!File.Exists(current) && !Directory.Exists(current))
+					{
+						break;
+					}
+					if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+					{
+						return false;
+					}
+				}
+				return true;
+			}
+		}
+		catch
+		{
+		}
+		return false;
+	}
+
+	internal void FitDesktopBounds()
+	{
+		Rect workArea = SystemParameters.WorkArea;
+		Left = workArea.Left;
+		Top = workArea.Top;
+		Width = workArea.Width;
+		Height = workArea.Height;
 	}
 
 	[DllImport("user32.dll", SetLastError = true)]
 	private static extern bool RegisterHotKey(nint hWnd, int id, uint fsModifiers, uint vk);
 
+	[DllImport("kernel32.dll", SetLastError = true)]
+	private static extern bool GetSystemTimes(out System.Runtime.InteropServices.ComTypes.FILETIME idleTime, out System.Runtime.InteropServices.ComTypes.FILETIME kernelTime, out System.Runtime.InteropServices.ComTypes.FILETIME userTime);
+
 	[DllImport("user32.dll", SetLastError = true)]
 	private static extern bool UnregisterHotKey(nint hWnd, int id);
+
+	[DllImport("user32.dll", SetLastError = true)]
+	private static extern IntPtr OpenInputDesktop(uint dwFlags, [MarshalAs(UnmanagedType.Bool)] bool fInherit, uint dwDesiredAccess);
+
+	[DllImport("user32.dll", SetLastError = true)]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	private static extern bool CloseDesktop(IntPtr hDesktop);
+
+	[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "GetUserObjectInformationW")]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	private static extern bool GetUserObjectInformation(IntPtr hObj, int nIndex, StringBuilder pvInfo, int nLength, out int lpnLengthNeeded);
+
+	[DllImport("wtsapi32.dll", SetLastError = true)]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	private static extern bool WTSQuerySessionInformationW(IntPtr hServer, int sessionId, int wtsInfoClass, out IntPtr ppBuffer, out int pBytesReturned);
+
+	[DllImport("wtsapi32.dll")]
+	private static extern void WTSFreeMemory(IntPtr pMemory);
+
+	[DllImport("user32.dll")]
+	private static extern IntPtr GetForegroundWindow();
+
+	[DllImport("user32.dll")]
+	private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
 	[DllImport("user32.dll")]
 	private static extern bool SetForegroundWindow(nint hWnd);
